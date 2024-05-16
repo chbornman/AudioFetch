@@ -8,7 +8,7 @@ There are many websites that host old audiobooks where you can listen to them th
 # Usage
 Download all audio from a webpage.
 
-"python ./download_audiobook.py <URL> <FILE_NAME_PREFIX>"
+"python ./download_audiobook.py </URL> <FILE_NAME_PREFIX>"
 
 positional arguments:
   url                   URL of the webpage to scrape
