@@ -5,40 +5,81 @@ import requests
 from bs4 import BeautifulSoup
 import sys
 import os
+import re
 from downloader import download_tracks
+from player_info import get_player_info
 
 def detect_plugin(url):
     """
     Detect which audio streaming plugin a website is using.
-    Returns the plugin name or None if no known plugin is detected.
+    Returns a tuple of (plugin_name, is_supported).
     """
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
         html = response.text.lower()
+        html_original = response.text  # Keep original case for some checks
         
-        # Check for Plyr
+        # List of all known audio players
+        detections = []
+        
+        # Check for Plyr (supported)
         if 'plyr' in html or 'new plyr' in html:
-            return 'plyr'
+            detections.append(('plyr', True))
         
-        # Check for simple MP3 links
-        soup = BeautifulSoup(response.text, 'html.parser')
-        # Check for direct MP3 links in href or data-url attributes
+        # Check for Howler.js (not yet supported)
+        if 'howler' in html or 'howl(' in html or 'howler.js' in html:
+            detections.append(('howler', False))
+        
+        # Check for MediaElement.js (not yet supported)
+        # More comprehensive detection patterns
+        mediaelement_patterns = [
+            'mediaelement',
+            'mejsplayer',
+            'mejs',
+            'mejs-',
+            'wp-mediaelement',  # WordPress integration
+            'mediaelement-and-player',
+            'mediaelementplayer',
+            'mejs__',  # BEM naming convention
+        ]
+        if any(pattern in html for pattern in mediaelement_patterns):
+            detections.append(('mediaelement', False))
+        
+        # Check for Video.js (not yet supported)
+        if 'video-js' in html or 'videojs' in html:
+            detections.append(('videojs', False))
+        
+        # Check for JW Player (not yet supported)
+        if 'jwplayer' in html or 'jwplatform' in html:
+            detections.append(('jwplayer', False))
+        
+        # Check for HTML5 audio elements (not yet supported as a dedicated scraper)
+        if '<audio' in html:
+            detections.append(('html5audio', False))
+        
+        # Check for SoundCloud embeds (not yet supported)
+        if 'soundcloud.com' in html or 'soundcloud-widget' in html:
+            detections.append(('soundcloud', False))
+        
+        # Check for Spotify embeds (not yet supported)
+        if 'spotify.com/embed' in html:
+            detections.append(('spotify', False))
+        
+        # Check for simple MP3 links (supported) - check this last
+        soup = BeautifulSoup(html_original, 'html.parser')
         mp3_links = soup.find_all(lambda tag: 
             (tag.name == 'a' and tag.get('href', '').endswith('.mp3')) or
             (tag.get('data-url', '').endswith('.mp3'))
         )
         if mp3_links:
-            return 'simple_mp3'
+            detections.append(('simple_mp3', True))
         
-        # Add more plugin detections here as needed
-        # Examples: 'mediaelement', 'videojs', 'howler', etc.
-        
-        return None
+        return detections
         
     except Exception as e:
         print(f"Error detecting plugin: {e}")
-        return None
+        return []
 
 def get_available_plugins():
     """Get list of available scraper plugins."""
@@ -59,7 +100,7 @@ def main():
         description='Comprehensive audio scraper supporting multiple streaming plugins.'
     )
     parser.add_argument('url', help='URL of the webpage to scrape')
-    parser.add_argument('name', help='Name prefix for downloaded files')
+    parser.add_argument('name', nargs='?', help='Name prefix for downloaded files (optional)')
     parser.add_argument(
         '-p', '--plugin', 
         help='Manually specify which plugin to use (e.g., simple_mp3, plyr)',
@@ -79,6 +120,29 @@ def main():
     
     args = parser.parse_args()
     
+    # Generate a fallback name if none provided
+    if args.name is None:
+        # Try to extract a meaningful name from the URL
+        from urllib.parse import urlparse
+        parsed_url = urlparse(args.url)
+        
+        # Try to get the last meaningful part of the path
+        path_parts = [p for p in parsed_url.path.strip('/').split('/') if p]
+        if path_parts:
+            # Use the last path segment, cleaned up
+            args.name = re.sub(r'[^\w\s-]', '', path_parts[-1])
+            args.name = re.sub(r'[-\s]+', '-', args.name)
+        else:
+            # Use the domain name as fallback
+            args.name = parsed_url.netloc.replace('.', '-')
+        
+        # If still empty or too short, use a timestamp
+        if not args.name or len(args.name) < 3:
+            from datetime import datetime
+            args.name = f"audio-download-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        
+        print(f"No name provided, using: {args.name}")
+    
     # Use name as directory if not specified
     if args.directory is None:
         args.directory = args.name
@@ -96,16 +160,56 @@ def main():
         plugin_name = args.plugin
         print(f"Using manually specified plugin: {plugin_name}")
     else:
-        print("Auto-detecting plugin...")
-        plugin_name = detect_plugin(args.url)
+        print("Auto-detecting audio player...")
+        detections = detect_plugin(args.url)
         
-        if plugin_name is None:
-            print("Error: Could not detect audio plugin type.")
+        if not detections:
+            print("\nError: Could not detect any audio player on this page.")
             print("Available plugins:", ', '.join(get_available_plugins()))
             print("Please specify a plugin manually with --plugin")
             sys.exit(1)
         
-        print(f"Detected plugin: {plugin_name}")
+        # Show all detected players
+        print("\nDetected audio players:")
+        supported = []
+        unsupported = []
+        
+        for player, is_supported in detections:
+            info = get_player_info(player)
+            if is_supported:
+                supported.append(player)
+                print(f"  ✓ {info['name']} - {info['description']}")
+            else:
+                unsupported.append(player)
+                print(f"  ✗ {info['name']} - {info['description']} (not yet implemented)")
+        
+        # Choose the first supported plugin
+        if supported:
+            plugin_name = supported[0]
+            
+            # If we have both supported and unsupported, mention both
+            if unsupported:
+                print(f"\nNote: The site uses {get_player_info(unsupported[0])['name']}, but we'll use {get_player_info(plugin_name)['name']} instead.")
+            else:
+                print(f"\nUsing: {get_player_info(plugin_name)['name']}")
+                
+            # Special note for simple_mp3 when other players are present
+            if plugin_name == 'simple_mp3' and unsupported:
+                print("The simple MP3 scraper will download any direct MP3 links found on the page.")
+        else:
+            # No supported plugins found, but we detected something
+            main_player = unsupported[0]
+            info = get_player_info(main_player)
+            print(f"\nUnfortunately, we haven't implemented support for {info['name']} yet.")
+            print(f"\nAbout {info['name']}:")
+            print(f"  {info['description']}")
+            for characteristic in info['characteristics']:
+                print(f"  • {characteristic}")
+            
+            print("\nYou can try the 'simple_mp3' scraper which works for direct MP3 links:")
+            print(f"  python main.py {args.url} {args.name or ''} -p simple_mp3")
+            print("\nThis will download any MP3 files that are directly linked on the page.")
+            sys.exit(1)
     
     # Import and run the appropriate scraper
     try:

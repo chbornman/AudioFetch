@@ -195,7 +195,10 @@ def download_tracks(tracks, directory, prefix=None, max_workers=5):
     download_tasks = []
     for i, track in enumerate(tracks, 1):
         # Generate filename
-        if prefix and track.get('track_num'):
+        if track.get('original_filename'):
+            # Use original filename if provided by scraper
+            filename = track['original_filename']
+        elif prefix and track.get('track_num'):
             # For simple scrapers that need numbering
             filename = f"{prefix}_{track['track_num']:03d}.mp3"
         else:

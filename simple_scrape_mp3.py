@@ -12,6 +12,7 @@ def scrape(url, prefix=None, directory=None):
         or None if scraping fails.
     """
     print(f"[Simple MP3 Scraper] Starting scrape of: {url}")
+    print("Looking for direct MP3 links on the page...")
     print("Fetching page content...")
     
     try:
@@ -47,15 +48,19 @@ def scrape(url, prefix=None, directory=None):
                 # Make sure the url_value is an absolute URL
                 url_value = urljoin(url, url_value)
                 
-                # Try to extract a meaningful name from the element or URL
-                name = element.get_text(strip=True) or f"Track {mp3_count}"
-                if not name or name == "":
-                    # Extract name from URL
-                    name = url_value.split('/')[-1].replace('.mp3', '')
+                # Extract original filename from URL
+                original_filename = url_value.split('/')[-1]
+                
+                # Try to get a display name from the element text
+                display_name = element.get_text(strip=True)
+                if not display_name:
+                    # Use filename without extension as display name
+                    display_name = original_filename.replace('.mp3', '')
                 
                 tracks.append({
                     'url': url_value,
-                    'name': name,
+                    'name': display_name,
+                    'original_filename': original_filename,
                     'track_num': mp3_count
                 })
                 
