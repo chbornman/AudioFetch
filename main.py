@@ -5,6 +5,7 @@ import requests
 from bs4 import BeautifulSoup
 import sys
 import os
+from downloader import download_tracks
 
 def detect_plugin(url):
     """
@@ -76,6 +77,14 @@ def main():
     if args.directory is None:
         args.directory = args.name
     
+    # Check if download directory already exists before doing anything else
+    downloads_dir = os.path.join('downloads', args.directory)
+    if os.path.exists(downloads_dir):
+        print(f"\nError: Directory 'downloads/{args.directory}' already exists!")
+        print("Please choose a different name or remove the existing directory.")
+        print(f"To remove: rm -rf downloads/{args.directory}")
+        sys.exit(1)
+    
     # Determine which plugin to use
     if args.plugin:
         plugin_name = args.plugin
@@ -105,9 +114,22 @@ def main():
         scraper = importlib.import_module(module_name)
         
         # Call the scraper's main function
-        # Each scraper should have a scrape() function
+        # Each scraper should have a scrape() function that returns track metadata
         if hasattr(scraper, 'scrape'):
-            scraper.scrape(args.url, args.name, args.directory)
+            tracks = scraper.scrape(args.url, args.name, args.directory)
+            if tracks:
+                # Download the tracks using the common downloader
+                result = download_tracks(tracks, args.directory, prefix=args.name if plugin_name == 'simple_mp3' else None)
+                if result.get('error'):
+                    sys.exit(1)
+                elif result['failed'] > 0:
+                    print(f"\nWarning: {result['failed']} downloads failed.")
+                    sys.exit(2)
+                else:
+                    print(f"\nAll downloads completed successfully!")
+            else:
+                print("Error: No tracks found to download")
+                sys.exit(1)
         else:
             print(f"Error: {module_name} does not have a scrape() function")
             sys.exit(1)

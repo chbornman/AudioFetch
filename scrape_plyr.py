@@ -1,38 +1,10 @@
 import requests
 from bs4 import BeautifulSoup
-import os
 import re
 import json
-from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urljoin, urlparse
-import time
+from urllib.parse import urljoin
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-def download_file(url, filename):
-    """Download a file from URL to filename."""
-    print(f"Starting download: {filename}")
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        response = requests.get(url, stream=True, headers=headers, timeout=120)
-        response.raise_for_status()
-        
-        total_size = int(response.headers.get('content-length', 0))
-        downloaded = 0
-        
-        with open(filename, 'wb') as fd:
-            for chunk in response.iter_content(chunk_size=8192):
-                fd.write(chunk)
-                downloaded += len(chunk)
-                if total_size > 0:
-                    percent = (downloaded / total_size) * 100
-                    print(f"\r{filename}: {percent:.1f}% complete", end='', flush=True)
-        
-        print(f"\n✓ Download completed: {filename}")
-        return True
-    except Exception as e:
-        print(f"\n✗ Download failed for {filename}: {e}")
-        return False
 
 def extract_tracks_from_javascript(html_content):
     """
@@ -124,6 +96,7 @@ def extract_tracks_from_javascript(html_content):
     
     return tracks
 
+
 def fetch_mp3_url_from_api(chapter_id, server_type=1):
     """
     Fetch the actual MP3 URL from the API using chapter ID.
@@ -147,6 +120,7 @@ def fetch_mp3_url_from_api(chapter_id, server_type=1):
     except Exception as e:
         print(f"Error fetching MP3 URL for chapter {chapter_id}: {e}")
         return None
+
 
 def extract_dropbox_links(html_content, base_url):
     """
@@ -174,10 +148,14 @@ def extract_dropbox_links(html_content, base_url):
     
     return list(set(links))  # Remove duplicates
 
-def scrape(url, prefix, directory):
+
+def scrape(url, prefix=None, directory=None):
     """
-    Main entry point for Plyr audio scraping.
-    Extracts audio URLs from Plyr-based audio players.
+    Extract audio track metadata from Plyr-based audio players.
+    
+    Returns:
+        List of track dictionaries with 'url' and 'name' keys,
+        or None if scraping fails.
     """
     print(f"[Plyr Scraper] Starting scrape of: {url}")
     print("Fetching page content...")
@@ -195,78 +173,60 @@ def scrape(url, prefix, directory):
         print("Analyzing page for Plyr audio tracks...")
         tracks = extract_tracks_from_javascript(html_content)
         
-        # Fetch MP3 URLs for tracks that need API calls
-        print("\nFetching MP3 URLs from API...")
-        for track in tracks:
-            if track['needs_api'] and track['chapter_id'] != '0':
-                mp3_url = fetch_mp3_url_from_api(track['chapter_id'])
-                if mp3_url:
-                    track['url'] = mp3_url
-                    print(f"  ✓ Got URL for: {track['name']}")
-                else:
-                    print(f"  ✗ Failed to get URL for: {track['name']}")
+        # Fetch MP3 URLs for tracks that need API calls using parallel requests
+        api_tracks = [t for t in tracks if t.get('needs_api') and t.get('chapter_id') != '0']
+        
+        if api_tracks:
+            print(f"\nFetching MP3 URLs from API for {len(api_tracks)} tracks...")
+            
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                future_to_track = {
+                    executor.submit(fetch_mp3_url_from_api, track['chapter_id']): track 
+                    for track in api_tracks
+                }
+                
+                for future in as_completed(future_to_track):
+                    track = future_to_track[future]
+                    try:
+                        mp3_url = future.result()
+                        if mp3_url:
+                            track['url'] = mp3_url
+                    except Exception as e:
+                        print(f"  ✗ Failed to get URL for: {track['name']} - {e}")
         
         # Filter out tracks without URLs
-        tracks = [t for t in tracks if t.get('url')]
+        tracks_with_urls = [t for t in tracks if t.get('url')]
         
-        if not tracks:
+        if not tracks_with_urls:
             print("No audio tracks found. This might require a more advanced scraping method.")
             print("Consider using the scrape_with_playwright.py for JavaScript-heavy sites.")
-            return
+            return None
         
-        print(f"\nFound {len(tracks)} audio tracks:")
-        for track in tracks:
-            print(f"  - {track['name']}")
+        print(f"\nFound {len(tracks_with_urls)} audio tracks:")
+        for i, track in enumerate(tracks_with_urls, 1):
+            print(f"  {i:2d}. {track['name']:<40} {track['url']}")
         
-        # Create directory if it doesn't exist
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-        
-        # Download files
-        print(f"\nDownloading to: {directory}/")
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            download_tasks = []
-            
-            for track in tracks:
-                # Clean filename
-                safe_name = re.sub(r'[^\w\s-]', '', track['name'])
-                safe_name = re.sub(r'[-\s]+', '-', safe_name)
-                
-                # Use track number for consistent ordering
-                track_num = track.get('track_num', track.get('chapter_id', len(tracks)))
-                filename = os.path.join(
-                    directory, 
-                    f"{prefix}_{track_num:03d}_{safe_name}.mp3"
-                )
-                
-                # Handle various URL formats
-                audio_url = track['url']
-                if not audio_url.startswith('http'):
-                    # Try to construct full URL
-                    audio_url = urljoin(url, audio_url)
-                
-                download_tasks.append(
-                    executor.submit(download_file, audio_url, filename)
-                )
-                time.sleep(0.5)  # Small delay to avoid overwhelming the server
-        
-        print(f"\n[Plyr Scraper] Scraping completed!")
+        # Return track metadata for main.py to download
+        return tracks_with_urls
         
     except Exception as e:
         print(f"Error during Plyr scraping: {e}")
         print("\nTip: If this is a complex JavaScript site, try using Playwright:")
         print("  python scrape_with_playwright.py")
+        return None
+
 
 # Allow script to be run standalone for testing
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Plyr audio player scraper')
     parser.add_argument('url', help='URL of the webpage to scrape')
-    parser.add_argument('prefix', help='Prefix for all file names')
+    parser.add_argument('prefix', help='Prefix for all file names', nargs='?')
     parser.add_argument('-d', '--directory', help='Directory to save files', default=None)
     args = parser.parse_args()
     
-    if args.directory is None:
-        args.directory = args.prefix
-    
-    scrape(args.url, args.prefix, args.directory)
+    tracks = scrape(args.url)
+    if tracks:
+        print(f"\nExtracted {len(tracks)} tracks successfully.")
+    else:
+        print("\nFailed to extract tracks.")
