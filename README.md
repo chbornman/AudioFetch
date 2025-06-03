@@ -1,6 +1,6 @@
-# Audio Downloader Script
+# Audio Downloader
 
-A comprehensive command-line tool for downloading audio files from various web-based audio players. The tool automatically detects the type of audio player used on a webpage and extracts all available audio tracks for download.
+Command-line tool for downloading audio files from various web-based audio players. The tool automatically detects the type of audio player used on a webpage and extracts all available audio tracks for download.
 
 ## Supported Audio Players
 
