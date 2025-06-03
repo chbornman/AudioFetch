@@ -66,14 +66,15 @@ def detect_plugin(url):
         if 'spotify.com/embed' in html:
             detections.append(('spotify', False))
         
-        # Check for simple MP3 links (supported) - check this last
+        # Check for simple audio file links (supported) - check this last
         soup = BeautifulSoup(html_original, 'html.parser')
-        mp3_links = soup.find_all(lambda tag: 
-            (tag.name == 'a' and tag.get('href', '').endswith('.mp3')) or
-            (tag.get('data-url', '').endswith('.mp3'))
+        audio_extensions = ('.mp3', '.m4a', '.aac', '.ogg', '.opus', '.webm', '.wav', '.flac')
+        audio_links = soup.find_all(lambda tag: 
+            (tag.name == 'a' and tag.get('href', '') and any(tag.get('href', '').lower().endswith(ext) for ext in audio_extensions)) or
+            (tag.get('data-url', '') and any(tag.get('data-url', '').lower().endswith(ext) for ext in audio_extensions))
         )
-        if mp3_links:
-            detections.append(('simple_mp3', True))
+        if audio_links:
+            detections.append(('simple', True))
         
         return detections
         
@@ -87,7 +88,7 @@ def get_available_plugins():
     
     # Check for scraper modules
     if os.path.exists('simple_scrape_mp3.py'):
-        plugins.append('simple_mp3')
+        plugins.append('simple')
     if os.path.exists('scrape_plyr.py'):
         plugins.append('plyr')
     
@@ -193,9 +194,9 @@ def main():
             else:
                 print(f"\nUsing: {get_player_info(plugin_name)['name']}")
                 
-            # Special note for simple_mp3 when other players are present
-            if plugin_name == 'simple_mp3' and unsupported:
-                print("The simple MP3 scraper will download any direct MP3 links found on the page.")
+            # Special note for simple when other players are present
+            if plugin_name == 'simple' and unsupported:
+                print("The simple audio scraper will download any direct audio file links found on the page.")
         else:
             # No supported plugins found, but we detected something
             main_player = unsupported[0]
@@ -206,14 +207,14 @@ def main():
             for characteristic in info['characteristics']:
                 print(f"  • {characteristic}")
             
-            print("\nYou can try the 'simple_mp3' scraper which works for direct MP3 links:")
-            print(f"  python main.py {args.url} {args.name or ''} -p simple_mp3")
-            print("\nThis will download any MP3 files that are directly linked on the page.")
+            print("\nYou can try the 'simple' scraper which works for direct audio file links:")
+            print(f"  python main.py {args.url} {args.name or ''} -p simple")
+            print("\nThis will download any audio files (MP3, M4A, AAC, OGG, etc.) that are directly linked on the page.")
             sys.exit(1)
     
     # Import and run the appropriate scraper
     try:
-        if plugin_name == 'simple_mp3':
+        if plugin_name == 'simple':
             module_name = 'simple_scrape_mp3'
         elif plugin_name == 'plyr':
             module_name = 'scrape_plyr'
@@ -232,7 +233,7 @@ def main():
                 result = download_tracks(
                     tracks, 
                     args.directory, 
-                    prefix=args.name if plugin_name == 'simple_mp3' else None,
+                    prefix=args.name if plugin_name == 'simple' else None,
                     max_workers=args.workers
                 )
                 if result.get('error'):

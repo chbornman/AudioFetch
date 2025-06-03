@@ -13,12 +13,24 @@ PLAYER_INFO = {
             'May use APIs to load track URLs'
         ]
     },
-    'simple_mp3': {
-        'name': 'Simple MP3 Links',
-        'description': 'Direct MP3 file links on the page',
+    'simple': {
+        'name': 'Simple Audio Links',
+        'description': 'Direct audio file links on the page',
         'supported': True,
         'characteristics': [
-            'Direct download links',
+            'Direct download links for audio files',
+            'Supports MP3, M4A, AAC, OGG, OPUS, WebM, WAV, FLAC',
+            'No JavaScript required',
+            'Preserves original filenames'
+        ]
+    },
+    'simple_mp3': {  # Keep for backwards compatibility
+        'name': 'Simple Audio Links',
+        'description': 'Direct audio file links on the page',
+        'supported': True,
+        'characteristics': [
+            'Direct download links for audio files',
+            'Supports MP3, M4A, AAC, OGG, OPUS, WebM, WAV, FLAC',
             'No JavaScript required',
             'Preserves original filenames'
         ]

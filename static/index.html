@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Downloader</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Audio Downloader</h1>
+            <p>Download audio tracks from websites using various audio players</p>
+        </header>
+
+        <main>
+            <section class="download-form">
+                <h2>New Download</h2>
+                <form id="downloadForm">
+                    <div class="form-group">
+                        <label for="url">Website URL:</label>
+                        <input type="url" id="url" name="url" required placeholder="https://example.com/audiobook">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="name">Download Name (optional):</label>
+                        <input type="text" id="name" name="name" placeholder="my-audiobook">
+                        <small>Leave empty to auto-generate from URL</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="plugin">Audio Player (optional):</label>
+                        <select id="plugin" name="plugin">
+                            <option value="">Auto-detect</option>
+                            <option value="simple">Simple Audio Links</option>
+                            <option value="plyr">Plyr Player</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="workers">Parallel Downloads:</label>
+                        <input type="number" id="workers" name="workers" min="1" max="10" value="5">
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary">Start Download</button>
+                </form>
+            </section>
+
+            <section class="jobs-section">
+                <h2>Download Jobs</h2>
+                <div id="jobsList" class="jobs-list">
+                    <p class="empty-state">No active jobs</p>
+                </div>
+            </section>
+
+            <section class="downloads-section">
+                <div class="section-header">
+                    <h2>Completed Downloads</h2>
+                    <button id="toggleDownloads" class="btn btn-small" onclick="toggleAllDownloads()" style="display: none;">
+                        Show All
+                    </button>
+                </div>
+                <div id="downloadsList" class="downloads-list">
+                    <p class="empty-state">No downloads yet</p>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

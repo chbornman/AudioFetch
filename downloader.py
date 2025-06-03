@@ -123,6 +123,58 @@ def download_file_with_progress(url, filename, track_info, progress_mgr=None):
         return False, 0
 
 
+def download_file_docker(url, filename, track_num):
+    """Download file in Docker environment without fancy progress."""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, stream=True, headers=headers, timeout=120)
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        
+        with open(filename, 'wb') as fd:
+            for chunk in response.iter_content(chunk_size=32768):
+                fd.write(chunk)
+        
+        return True, total_size, track_num
+    except Exception as e:
+        print(f"[ERROR] Track {track_num}: {str(e)}")
+        return False, 0, track_num
+
+
+def download_file_docker(url, filename, track_info):
+    """Docker-friendly download without ANSI escape sequences."""
+    name = os.path.basename(filename)
+    track_num = track_info['num']
+    total_tracks = track_info['total']
+    
+    print(f"[{track_num}/{total_tracks}] Downloading {name}...")
+    sys.stdout.flush()
+    
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, stream=True, headers=headers, timeout=120)
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        
+        with open(filename, 'wb') as fd:
+            for chunk in response.iter_content(chunk_size=32768):
+                fd.write(chunk)
+        
+        print(f"[{track_num}/{total_tracks}] ✓ {name} ({format_size(total_size)})")
+        sys.stdout.flush()
+        return True, total_size
+    except Exception as e:
+        print(f"[{track_num}/{total_tracks}] ✗ {name} - Error: {str(e)}")
+        sys.stdout.flush()
+        return False, 0
+
+
 def download_file_simple(url, filename, track_info):
     """Simple download with inline progress (sequential mode)."""
     name = os.path.basename(filename)
@@ -163,7 +215,7 @@ def download_file_simple(url, filename, track_info):
         return False, 0
 
 
-def download_tracks(tracks, directory, prefix=None, max_workers=5):
+def download_tracks(tracks, directory, prefix=None, max_workers=5, progress_callback=None):
     """
     Download all tracks with consistent progress display.
     
@@ -181,12 +233,16 @@ def download_tracks(tracks, directory, prefix=None, max_workers=5):
     if not os.path.exists(downloads_dir):
         os.makedirs(downloads_dir)
     
-    print(f"\nDownloading to: downloads/{directory}/")
-    print(f"Total tracks to download: {len(tracks)}")
+    # Detect if running in Docker (no TTY)
+    is_docker = not sys.stdout.isatty()
     
-    if max_workers > 1:
-        print(f"Parallel downloads: {max_workers}")
-    print("-" * 80)
+    if not is_docker:
+        print(f"\nDownloading to: downloads/{directory}/")
+        print(f"Total tracks to download: {len(tracks)}")
+        
+        if max_workers > 1:
+            print(f"Parallel downloads: {max_workers}")
+        print("-" * 80)
     
     successful = 0
     failed = 0
@@ -216,7 +272,32 @@ def download_tracks(tracks, directory, prefix=None, max_workers=5):
         download_tasks.append((track['url'], filepath, track_info))
     
     # Execute downloads
-    if max_workers == 1:
+    if is_docker:
+        # Docker mode - simple progress without ANSI escape sequences
+        print(f"Starting download of {len(tracks)} tracks...")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_task = {
+                executor.submit(download_file_docker, url, filepath, track_info): (url, filepath, track_info)
+                for url, filepath, track_info in download_tasks
+            }
+            
+            for future in as_completed(future_to_task):
+                try:
+                    success, size = future.result()
+                    if success:
+                        successful += 1
+                    else:
+                        failed += 1
+                    if progress_callback:
+                        progress_callback(successful, failed)
+                        
+                except Exception as e:
+                    failed += 1
+                    print(f"[ERROR] Unexpected error: {e}")
+                    if progress_callback:
+                        progress_callback(successful, failed)
+                        
+    elif max_workers == 1:
         # Sequential downloads with inline progress
         for url, filepath, track_info in download_tasks:
             success, size = download_file_simple(url, filepath, track_info)
@@ -224,6 +305,8 @@ def download_tracks(tracks, directory, prefix=None, max_workers=5):
                 successful += 1
             else:
                 failed += 1
+            if progress_callback:
+                progress_callback(successful, failed)
     else:
         # Parallel downloads with multi-line progress
         progress_mgr = MultiLineProgress(len(tracks))
@@ -247,18 +330,23 @@ def download_tracks(tracks, directory, prefix=None, max_workers=5):
                         successful += 1
                     else:
                         failed += 1
+                    if progress_callback:
+                        progress_callback(successful, failed)
                 except Exception as e:
                     failed += 1
                     print(f"\nUnexpected error in download: {e}")
+                    if progress_callback:
+                        progress_callback(successful, failed)
         
         # Move cursor to bottom after all lines
         print()
     
-    print("-" * 80)
-    print(f"\nDownload Summary:")
-    print(f"  ✓ Successful: {successful}")
-    print(f"  ✗ Failed: {failed}")
-    print(f"  Total: {len(tracks)}")
+    if not is_docker:
+        print("-" * 80)
+        print(f"\nDownload Summary:")
+        print(f"  ✓ Successful: {successful}")
+        print(f"  ✗ Failed: {failed}")
+        print(f"  Total: {len(tracks)}")
     
     return {
         'successful': successful,

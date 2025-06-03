@@ -244,6 +244,57 @@ Contributions are welcome! If you'd like to add support for a new player or feat
 3. Add your scraper or enhancement
 4. Submit a pull request
 
+## Web Application with Docker
+
+The project now includes a web interface that can be run as a containerized application using Docker.
+
+### Docker Setup
+
+1. **Build and run with Docker Compose:**
+   ```bash
+   docker-compose up -d
+   ```
+
+2. **Access the web interface:**
+   Open your browser and navigate to `http://localhost:8000`
+
+3. **View logs:**
+   ```bash
+   docker-compose logs -f
+   ```
+
+4. **Stop the application:**
+   ```bash
+   docker-compose down
+   ```
+
+### Web Interface Features
+
+- **Simple HTML/CSS frontend** - No JavaScript frameworks required
+- **Real-time progress tracking** - Monitor download progress for all tracks
+- **Job management** - View active and completed download jobs
+- **Download management** - Browse and delete completed downloads
+- **Auto-detection** - Same plugin detection as the CLI version
+- **Background processing** - Downloads continue even if you close the browser
+
+### Docker Configuration
+
+The `docker-compose.yml` file:
+- Maps port 8000 for web access
+- Mounts the `downloads` directory as a volume for persistent storage
+- Auto-restarts the container unless explicitly stopped
+
+### API Endpoints
+
+The FastAPI backend provides these endpoints:
+- `GET /` - Main web interface
+- `POST /api/download` - Start a new download job
+- `GET /api/status/{job_id}` - Check job status
+- `GET /api/jobs` - List all jobs
+- `DELETE /api/jobs/{job_id}` - Delete a completed job
+- `GET /api/downloads` - List completed downloads
+- `DELETE /api/downloads/{name}` - Delete a download
+
 ## License
 
 This script is provided as-is under the MIT License. Feel free to modify and distribute.
