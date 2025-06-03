@@ -70,6 +70,12 @@ def main():
         help='Directory to save files (defaults to name)',
         default=None
     )
+    parser.add_argument(
+        '-w', '--workers',
+        help='Number of parallel downloads (default 5)',
+        type=int,
+        default=5
+    )
     
     args = parser.parse_args()
     
@@ -119,7 +125,12 @@ def main():
             tracks = scraper.scrape(args.url, args.name, args.directory)
             if tracks:
                 # Download the tracks using the common downloader
-                result = download_tracks(tracks, args.directory, prefix=args.name if plugin_name == 'simple_mp3' else None)
+                result = download_tracks(
+                    tracks, 
+                    args.directory, 
+                    prefix=args.name if plugin_name == 'simple_mp3' else None,
+                    max_workers=args.workers
+                )
                 if result.get('error'):
                     sys.exit(1)
                 elif result['failed'] > 0:
