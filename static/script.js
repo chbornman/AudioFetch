@@ -4,6 +4,28 @@ const API_BASE = '/api';
 // Store active job IDs for polling
 const activeJobs = new Set();
 
+// Store jobs that should auto-download when ready
+const autoDownloadJobs = new Set();
+
+// Helper function to fetch ZIP progress
+async function fetchZipProgress(jobId) {
+    try {
+        const response = await fetch(`${API_BASE}/jobs/${jobId}/zip-progress`);
+        return await response.json();
+    } catch (error) {
+        return { status: 'error' };
+    }
+}
+
+// Helper function to format bytes
+function formatBytes(bytes) {
+    if (!bytes) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
 // Initialize the app
 document.addEventListener('DOMContentLoaded', () => {
     const form = document.getElementById('downloadForm');
@@ -27,7 +49,7 @@ async function handleFormSubmit(e) {
         name: formData.get('name') || null,
         plugin: formData.get('plugin') || null,
         workers: parseInt(formData.get('workers')),
-        download_mode: 'server'  // Always server mode
+        download_mode: formData.get('downloadMode') || 'server'
     };
     
     try {
@@ -46,6 +68,11 @@ async function handleFormSubmit(e) {
         
         const job = await response.json();
         activeJobs.add(job.job_id);
+        
+        // Mark browser mode jobs for auto-download
+        if (data.download_mode === 'browser') {
+            autoDownloadJobs.add(job.job_id);
+        }
         
         // Clear form
         e.target.reset();
@@ -76,7 +103,7 @@ async function loadJobs() {
         
         jobsList.innerHTML = jobs.map(job => {
             // Track active jobs
-            if (['pending', 'detecting', 'downloading'].includes(job.status)) {
+            if (['pending', 'detecting', 'downloading', 'zipping'].includes(job.status)) {
                 activeJobs.add(job.job_id);
             }
             
@@ -104,6 +131,22 @@ function createJobElement(job) {
         `;
     }
     
+    // Special handling for zipping status
+    if (job.status === 'zipping' && job.download_mode === 'browser') {
+        // Auto-fetch ZIP progress
+        fetchZipProgress(job.job_id).then(progress => {
+            if (progress.status === 'downloading') {
+                const percent = Math.round((progress.completed / progress.total) * 100);
+                progressHtml = `
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${percent}%"></div>
+                    </div>
+                    <div>Creating ZIP: ${progress.completed}/${progress.total} tracks (${percent}%)</div>
+                `;
+            }
+        });
+    }
+    
     let resultHtml = '';
     if (job.result) {
         resultHtml = `
@@ -117,15 +160,37 @@ function createJobElement(job) {
     if (job.status === 'completed' || job.status === 'error' || job.status === 'cancelled') {
         // Show Clear button for completed/error/cancelled jobs
         if (job.status === 'completed' && job.result && job.result.successful > 0) {
-            const downloadName = job.download_name || job.job_id.substring(0, 8);
-            actionHtml = `
-                <button class="btn btn-primary btn-small" onclick="downloadAsZip('${downloadName}')">
-                    Download ZIP
-                </button>
-                <button class="btn btn-danger btn-small" onclick="clearJob('${job.job_id}')">
-                    Clear
-                </button>
-            `;
+            // Check if browser mode
+            if (job.download_mode === 'browser') {
+                if (job.zip_ready) {
+                    // ZIP is ready, show download button
+                    actionHtml = `
+                        <button class="btn btn-primary btn-small" onclick="downloadJobAsZip('${job.job_id}')">
+                            Download ZIP (${formatBytes(job.result.zip_size)})
+                        </button>
+                        <button class="btn btn-danger btn-small" onclick="clearJob('${job.job_id}')">
+                            Clear
+                        </button>
+                    `;
+                } else {
+                    // ZIP not ready yet, just show clear button
+                    actionHtml = `
+                        <button class="btn btn-danger btn-small" onclick="clearJob('${job.job_id}')">
+                            Clear
+                        </button>
+                    `;
+                }
+            } else {
+                const downloadName = job.download_name || job.job_id.substring(0, 8);
+                actionHtml = `
+                    <button class="btn btn-primary btn-small" onclick="downloadAsZip('${downloadName}')">
+                        Download ZIP
+                    </button>
+                    <button class="btn btn-danger btn-small" onclick="clearJob('${job.job_id}')">
+                        Clear
+                    </button>
+                `;
+            }
         } else {
             actionHtml = `
                 <button class="btn btn-danger btn-small" onclick="clearJob('${job.job_id}')">
@@ -142,6 +207,8 @@ function createJobElement(job) {
         `;
     }
     
+    const downloadModeHtml = job.download_mode ? `<div>Mode: ${job.download_mode === 'browser' ? 'Stream to Browser' : 'Download to Server'}</div>` : '';
+    
     return `
         <div class="job-item">
             <div class="job-header">
@@ -150,6 +217,7 @@ function createJobElement(job) {
             </div>
             <div class="job-details">
                 <div>Created: ${createdAt}</div>
+                ${downloadModeHtml}
                 ${job.message ? `<div class="job-message">${job.message}</div>` : ''}
                 ${progressHtml}
                 ${resultHtml}
@@ -182,10 +250,23 @@ async function pollActiveJobs() {
             }
             
             // Remove from active jobs if completed
-            if (!['pending', 'detecting', 'downloading'].includes(job.status)) {
+            if (!['pending', 'detecting', 'downloading', 'zipping'].includes(job.status)) {
                 activeJobs.delete(jobId);
-                // Reload downloads if job completed successfully
-                if (job.status === 'completed') {
+                
+                // Handle browser mode auto-download
+                if (job.status === 'completed' && job.download_mode === 'browser' && job.zip_ready) {
+                    // Check if this job should auto-download
+                    if (autoDownloadJobs.has(jobId)) {
+                        autoDownloadJobs.delete(jobId);
+                        // Trigger download automatically
+                        setTimeout(() => {
+                            window.location.href = `${API_BASE}/jobs/${jobId}/download-zip`;
+                        }, 500);
+                    }
+                }
+                
+                // Reload downloads if job completed successfully (server mode only)
+                if (job.status === 'completed' && job.download_mode !== 'browser') {
                     loadDownloads();
                 }
             }
@@ -325,6 +406,16 @@ async function deleteDownload(name) {
 async function downloadAsZip(name) {
     try {
         window.location.href = `${API_BASE}/downloads/${encodeURIComponent(name)}/zip`;
+    } catch (error) {
+        alert(`Error: ${error.message}`);
+    }
+}
+
+// Download job as ZIP (browser mode)
+async function downloadJobAsZip(jobId) {
+    try {
+        // Simple download - the ZIP is already created
+        window.location.href = `${API_BASE}/jobs/${jobId}/download-zip`;
     } catch (error) {
         alert(`Error: ${error.message}`);
     }
