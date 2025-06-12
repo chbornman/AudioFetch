@@ -60,15 +60,15 @@
           </div>
         </div>
 
-        <div class="form-row">
-          <div class="form-group">
-            <label for="workers">Parallel Workers</label>
-            <input type="number" id="workers" value="5" min="1" max="20" />
-          </div>
+          <div class="form-row">
+            <div class="form-group" id="workers-group" style="display: none;">
+                    <label for="workers">Parallel Workers</label>
+                    <input type="number" id="workers" value="5" min="1" max="20" />
+                </div>
 
-          <div class="form-group">
-            <label for="download-mode">Download Mode</label>
-            <select id="download-mode">
+            <div class="form-group" id="download-mode-group" style="display: none;">
+              <label for="download-mode">Download Mode</label>
+              <select id="download-mode">
               <option value="browser">Browser (no server storage)</option>
               <option
                 value="server"

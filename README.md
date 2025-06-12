@@ -56,15 +56,22 @@ The app will be available at `http://localhost:8000`
 
 ### Using Docker
 
-```bash
-docker-compose up --build
-```
+1. Copy the example environment file and fill in your real values:
+   ```bash
+   cp .env.example .env
+   # Edit .env to set ADMIN_PASSWORD, SECRET_KEY, PORT, etc.
+   ```
+
+2. Build and start the containers:
+   ```bash
+   docker-compose up --build -d
+   ```
 
 ## Usage Guide
 
 ### Browser Mode (No Authentication Required)
 
-1. Open `http://localhost:8000` in your browser
+1. Open `http://localhost:<YOUR_ENV_PORT_NUMBER>` in your browser
 2. Enter the URL of the page containing audio
 3. Leave "Download Mode" as "Browser"
 4. Click "Start Download"
@@ -72,10 +79,11 @@ docker-compose up --build
 
 ### Server Mode (Authentication Required)
 
-1. Click on "Admin Login" and enter the admin password
-2. Select "Server" as the download mode
-3. Start the download - files will be saved on the server
-4. Access saved downloads from the "Server Downloads" section
+1. Double Click AudioFetch title.
+2. Click on "Admin Login" and enter the admin password
+3. Select "Server" as the download mode
+4. Start the download - files will be saved on the server
+5. Access saved downloads from the "Server Downloads" section
 
 ### CLI Usage (Original Functionality)
 
@@ -199,15 +207,99 @@ Log format includes:
 
 ## Deployment
 
-For VPS deployment:
+Below is a step-by-step guide to deploy AudioFetch on a generic Ubuntu VPS.
 
-1. Use a reverse proxy (Nginx/Caddy)
-2. Enable SSL/TLS
-3. Set strong admin password
-4. Configure firewall rules
-5. Use process manager (systemd/supervisor)
+### 1. Server Preparation
 
-Example Nginx config:
+SSH into your server and update packages:
+
+```bash
+sudo apt update && sudo apt upgrade -y
+```
+
+Create a non-root sudo user (e.g. `deployer`):
+
+```bash
+sudo adduser deployer
+sudo usermod -aG sudo deployer
+su - deployer
+```
+
+Optional: Harden SSH access by disabling root login and password authentication:
+
+```bash
+sudo sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sudo sed -i 's/^PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sudo systemctl reload sshd
+```
+
+### 2. Install Docker & Compose
+
+Install Docker Engine:
+
+```bash
+curl -fsSL https://get.docker.com | sh
+```
+
+Install the Docker Compose plugin:
+
+```bash
+sudo apt update
+sudo apt install -y docker-compose-plugin
+```
+
+Add your user to the `docker` group and re-login:
+
+```bash
+sudo usermod -aG docker $USER
+su - $USER
+```
+
+### 3. Clone & Configure the App
+
+```bash
+git clone https://github.com/your-org/your-repo.git
+cd your-repo
+cp .env.example .env
+# Edit .env: set ADMIN_PASSWORD, SECRET_KEY, PORT, etc.
+mkdir -p downloads
+```
+
+### 4. Launch with Docker Compose
+
+```bash
+docker compose up --build -d
+```
+
+Verify containers are running:
+
+```bash
+docker ps
+docker compose logs -f
+```
+
+### 5. Firewall Configuration
+
+Allow SSH, HTTP, and HTTPS (and your app port if non-standard):
+
+```bash
+sudo ufw allow OpenSSH
+sudo ufw allow http
+sudo ufw allow https
+sudo ufw allow ${PORT}/tcp
+sudo ufw enable
+```
+
+### 6. (Optional) Reverse Proxy & SSL
+
+Install Nginx and Certbot:
+
+```bash
+sudo apt install -y nginx certbot python3-certbot-nginx
+sudo certbot --nginx -d your-domain.com
+```
+
+Use a simple proxy config to forward to your app:
 
 ```nginx
 server {
@@ -215,13 +307,43 @@ server {
     server_name your-domain.com;
 
     location / {
-        proxy_pass http://localhost:8000;
+        proxy_pass http://localhost:${PORT};
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
     }
 }
+```
+
+### 7. (Optional) Auto-Start on Boot
+
+Create a systemd service at `/etc/systemd/system/audiofetch.service`:
+
+```ini
+[Unit]
+Description=AudioFetch FastAPI Docker Compose service
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/deployer/your-repo
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+RemainAfterExit=yes
+User=deployer
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable audiofetch
+sudo systemctl start audiofetch
 ```
 
 ## Troubleshooting

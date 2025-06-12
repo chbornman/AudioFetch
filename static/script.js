@@ -2,6 +2,9 @@
 let ws = null;
 let authToken = null;
 let isAuthenticated = false;
+// Fallback polling if WebSocket disconnects
+let fallbackPollID = null;
+const fallbackPollInterval = 30000; // ms
 
 // Initialize WebSocket connection
 function initWebSocket() {
@@ -11,6 +14,11 @@ function initWebSocket() {
     ws.onopen = () => {
         console.log('WebSocket connected');
         updateConnectionStatus(true);
+        // Stop fallback polling when WS reconnects
+        if (fallbackPollID) {
+            clearInterval(fallbackPollID);
+            fallbackPollID = null;
+        }
     };
     
     ws.onmessage = (event) => {
@@ -23,6 +31,10 @@ function initWebSocket() {
     ws.onclose = () => {
         console.log('WebSocket disconnected');
         updateConnectionStatus(false);
+        // Start fallback polling
+        if (!fallbackPollID) {
+            fallbackPollID = setInterval(loadJobs, fallbackPollInterval);
+        }
         // Reconnect after 3 seconds
         setTimeout(initWebSocket, 3000);
     };
@@ -78,14 +90,25 @@ function showAuthenticatedUI() {
     document.getElementById('auth-section').style.display = 'none';
     document.getElementById('server-mode-option').style.display = 'block';
     document.getElementById('server-downloads-section').style.display = 'block';
+    // Show download mode selector for admin
+    document.getElementById('download-mode-group').style.display = 'block';
     loadServerDownloads();
+    // Hide or show workers input based on current mode
+    const wg = document.getElementById('workers-group');
+    const mode = document.getElementById('download-mode').value;
+    wg.style.display = (mode === 'server') ? 'block' : 'none';
 }
 
 function showUnauthenticatedUI() {
-    document.getElementById('auth-section').style.display = 'block';
+    document.getElementById('auth-section').style.display = 'none';
     document.getElementById('server-mode-option').style.display = 'none';
     document.getElementById('server-downloads-section').style.display = 'none';
+    // Hide download mode selector for guests
+    document.getElementById('download-mode-group').style.display = 'none';
     document.getElementById('download-mode').value = 'browser';
+    // Ensure workers input is hidden
+    const wg2 = document.getElementById('workers-group');
+    wg2.style.display = 'none';
 }
 
 // Download functionality
@@ -354,11 +377,37 @@ document.addEventListener('DOMContentLoaded', () => {
     // Initialize WebSocket
     initWebSocket();
     
+    // Toggle download mode & workers inputs based on auth & mode selection
+    const workersGroup = document.getElementById('workers-group');
+    const downloadModeSelect = document.getElementById('download-mode');
+    const dmGroup = document.getElementById('download-mode-group');
+    function toggleWorkersGroup() {
+        if (downloadModeSelect.value === 'server') workersGroup.style.display = 'block';
+        else workersGroup.style.display = 'none';
+    }
+    function toggleDownloadModeGroup() {
+        if (isAuthenticated) dmGroup.style.display = 'block';
+        else dmGroup.style.display = 'none';
+    }
+    downloadModeSelect.addEventListener('change', toggleWorkersGroup);
+    
+    // Secret trigger: double-click logo to reveal login
+    const logo = document.querySelector('.logo-container');
+    if (logo) {
+        logo.addEventListener('dblclick', () => {
+            const authSection = document.getElementById('auth-section');
+            authSection.style.display = authSection.style.display === 'block' ? 'none' : 'block';
+        });
+    }
+    // Initial hide/show
+    toggleDownloadModeGroup();
+    toggleWorkersGroup();
+    
     // Load initial jobs
     loadJobs();
     
-    // Set up auto-refresh for jobs
-    setInterval(loadJobs, 5000);
+    // Fallback polling removed; rely on WebSocket updates and slow fallback on disconnect
+    // If still needed, use loadJobs() manually after initial load
 });
 
 async function loadJobs() {
