@@ -126,7 +126,7 @@ async function startDownload() {
             document.getElementById('name').value = '';
             
             if (downloadMode === 'browser') {
-                showNotification('Download started! The file will stream directly to your browser.', 'success');
+                showNotification('Processing... Download will start automatically in a few seconds!', 'success');
             } else {
                 showNotification('Download started! Files will be saved to the server.', 'success');
             }
@@ -145,6 +145,8 @@ function addJobToList(job) {
     const jobsList = document.getElementById('jobs-list');
     const jobElement = createJobElement(job);
     jobsList.insertBefore(jobElement, jobsList.firstChild);
+    
+    // Don't auto-download here - let updateJobInList handle it when status changes
 }
 
 function updateJobInList(jobId, jobData) {
@@ -152,6 +154,15 @@ function updateJobInList(jobId, jobData) {
     if (jobElement) {
         const updatedElement = createJobElement(jobData);
         jobElement.replaceWith(updatedElement);
+    }
+    
+    // Auto-start download when job is ready for streaming
+    if (jobData.status === 'streaming' && jobData.download_mode === 'browser' && !autoDownloadedJobs.has(jobId)) {
+        console.log(`Job ${jobId} status changed to streaming, auto-downloading...`);
+        autoDownloadedJobs.add(jobId);
+        setTimeout(() => {
+            streamDownload(jobId);
+        }, 500); // Small delay to ensure UI updates
     }
 }
 
@@ -172,10 +183,12 @@ function createJobElement(job) {
     }
     
     let actionsHtml = '';
-    if (job.status === 'pending' || job.status === 'detecting' || job.status === 'downloading') {
+    if (job.status === 'pending' || job.status === 'detecting') {
         actionsHtml = `<button onclick="cancelJob('${job.job_id}')" class="btn-cancel">Cancel</button>`;
+    } else if (job.status === 'downloading') {
+        actionsHtml = `<span class="downloading-status">📥 Downloading to your browser...</span>`;
     } else if (job.status === 'streaming' && job.download_mode === 'browser') {
-        actionsHtml = `<button onclick="streamDownload('${job.job_id}')" class="btn-download">Download</button>`;
+        actionsHtml = `<span class="streaming-status">✅ Download started! Check your Downloads folder</span>`;
     } else if (job.status === 'completed' || job.status === 'error' || job.status === 'cancelled') {
         actionsHtml = `<button onclick="clearJob('${job.job_id}')" class="btn-clear">Clear</button>`;
     }
@@ -195,7 +208,12 @@ function createJobElement(job) {
     return div;
 }
 
+// Track which jobs have auto-downloaded
+const autoDownloadedJobs = new Set();
+
 async function streamDownload(jobId) {
+    console.log(`Starting download for job ${jobId}`);
+    
     // Create a hidden link and click it to start download
     const link = document.createElement('a');
     link.href = `/api/stream/${jobId}`;
@@ -204,7 +222,7 @@ async function streamDownload(jobId) {
     link.click();
     document.body.removeChild(link);
     
-    showNotification('Streaming download started!', 'success');
+    showNotification('🎉 ZIP file downloading! Check your browser\'s Downloads folder.', 'success');
 }
 
 async function cancelJob(jobId) {
@@ -349,8 +367,25 @@ async function loadJobs() {
         if (response.ok) {
             const jobs = await response.json();
             const jobsList = document.getElementById('jobs-list');
-            jobsList.innerHTML = '';
-            jobs.forEach(job => addJobToList(job));
+            
+            // Only clear and re-add if this is the first load
+            if (jobsList.children.length === 0) {
+                jobs.forEach(job => {
+                    addJobToList(job);
+                    // Mark existing streaming jobs as already downloaded
+                    if (job.status === 'streaming' && job.download_mode === 'browser') {
+                        autoDownloadedJobs.add(job.job_id);
+                    }
+                });
+            } else {
+                // Update existing jobs
+                jobs.forEach(job => {
+                    const existing = document.getElementById(`job-${job.job_id}`);
+                    if (!existing) {
+                        addJobToList(job);
+                    }
+                });
+            }
         }
     } catch (error) {
         console.error('Load jobs error:', error);

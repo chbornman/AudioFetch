@@ -415,3 +415,25 @@ button {
 .info-section strong {
     color: var(--text-primary);
 }
+
+/* Status messages */
+.downloading-status {
+    font-weight: 500;
+    color: var(--primary-color);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+.streaming-status {
+    font-weight: 600;
+    color: var(--success-color);
+    background: #f0fdf4;
+    padding: 4px 12px;
+    border-radius: 16px;
+    border: 1px solid var(--success-color);
+}
+
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.6; }
+    100% { opacity: 1; }
+}
