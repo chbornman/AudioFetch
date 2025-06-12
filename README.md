@@ -1,300 +1,229 @@
-# Audio Downloader
+# Audio Downloader v2.0
 
-Command-line tool for downloading audio files from various web-based audio players. The tool automatically detects the type of audio player used on a webpage and extracts all available audio tracks for download.
-
-## Supported Audio Players
-
-### 1. **Plyr-based Players**
-
-- Detects Plyr.js audio players commonly used on audiobook and podcast sites
-- Extracts tracks from JavaScript arrays and playlists
-- Supports sites that use APIs to fetch MP3 URLs dynamically
-- Handles both direct MP3 links and API-based track loading
-
-### 2. **Simple MP3 Links**
-
-- Finds all direct MP3 links on a page
-- Searches for `<a>` tags with `href` attributes ending in `.mp3`
-- Detects elements with `data-url` attributes pointing to MP3 files
-- Ideal for simple download pages or file listings
-
-**Note:** Many sites using MediaElement.js (WordPress default player) expose direct MP3 links that can be downloaded using the simple MP3 scraper. If MediaElement.js is detected, try using `-p simple_mp3`.
+A FastAPI-based web application for downloading audio from websites with real-time progress tracking via WebSockets.
 
 ## Features
 
-- **Auto-detection**: Automatically identifies which type of audio player is used
-- **Manual override**: Option to specify which scraper to use
-- **Parallel downloads**: Downloads multiple files simultaneously (default: 5 workers)
-- **Progress tracking**: Real-time progress bars for each download
-- **Smart naming**: Preserves track names from the website or uses original filenames
-- **Directory safety**: Prevents accidental overwrites by checking for existing directories
-- **Comprehensive logging**: Clear status updates throughout the scraping and download process
+### Core Features
+- **Browser Mode**: Stream downloads directly to browser without server storage
+- **Server Mode**: Password-protected downloads saved to server (for admin use)
+- **Real-time Progress**: WebSocket-based live updates
+- **Auto-detection**: Automatically detects audio players on websites
+- **Parallel Downloads**: Configurable workers for faster downloads
+- **Multiple Formats**: Supports MP3, M4A, AAC, OGG, OPUS, WebM, WAV, FLAC
 
-## Prerequisites
+### Supported Audio Players
+- ✅ Plyr.js audio players
+- ✅ Direct MP3 links
+- ❌ Howler.js (planned)
+- ❌ MediaElement.js (planned)
+- ❌ Video.js (planned)
 
-- Python 3.7+
-- pip (Python package manager)
+## Installation
 
-## Setup
+1. Clone the repository:
+```bash
+git clone <repository-url>
+cd download_audio
+git checkout containerized
+```
 
-### Using a Virtual Environment (Recommended)
-
-1. **Create a virtual environment:**
-
-   ```bash
-   python3 -m venv venv
-   ```
-
-2. **Activate the virtual environment:**
-
-   - On macOS/Linux:
-     ```bash
-     source venv/bin/activate
-     ```
-   - On Windows:
-     ```bash
-     venv\Scripts\activate
-     ```
-
-3. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-### Without Virtual Environment
-
-Install the required packages directly:
-
+2. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-## Usage
+3. Set environment variables (optional):
+```bash
+export ADMIN_PASSWORD="your-secure-password"  # Default: admin123
+export SECRET_KEY="your-secret-key"           # For JWT tokens
+```
 
-### Running the Script
+## Running the Application
 
-With virtual environment activated:
+### Local Development
+```bash
+python app.py
+```
+
+The app will be available at `http://localhost:8000`
+
+### Using Docker
+```bash
+docker-compose up --build
+```
+
+## Usage Guide
+
+### Browser Mode (No Authentication Required)
+1. Open `http://localhost:8000` in your browser
+2. Enter the URL of the page containing audio
+3. Leave "Download Mode" as "Browser"
+4. Click "Start Download"
+5. Files will stream directly to your browser as a ZIP
+
+### Server Mode (Authentication Required)
+1. Click on "Admin Login" and enter the admin password
+2. Select "Server" as the download mode
+3. Start the download - files will be saved on the server
+4. Access saved downloads from the "Server Downloads" section
+
+### CLI Usage (Original Functionality)
+The original command-line interface is still available:
 
 ```bash
-python main.py URL [NAME] [-p PLUGIN] [-d DIRECTORY] [-w WORKERS]
+python main.py <url> [name] [--plugin <plugin_name>] [--workers <num>]
 ```
 
-### Command Line Arguments
-
-- **URL**: The webpage address containing audio files (required)
-- **NAME**: Name for the download folder (optional - auto-generated if not provided)
-- **-p/--plugin**: Manually specify which plugin to use:
-  - `plyr` - For Plyr.js audio players
-  - `simple_mp3` - For direct MP3 links (also works for many MediaElement.js sites)
-- **-d/--directory**: Custom directory name (defaults to NAME)
-- **-w/--workers**: Number of parallel downloads (default: 5)
-
-### Automatic Naming
-
-If no name is provided, the script will automatically generate one based on:
-
-1. The last segment of the URL path (e.g., `/example-audio/` → `example-audio`)
-2. The domain name if no path exists (e.g., `example.com` → `example-com`)
-3. A timestamp if neither provides a good name (e.g., `audio-download-20240115-143022`)
-
-### Examples
-
-**Simplest usage (auto-detect everything):**
-
+Example:
 ```bash
-python main.py https://example.com/audio-streamer-example
+python main.py https://example.com/audiobook my-audiobook --plugin plyr --workers 10
 ```
 
-Auto-detects the player type and creates `downloads/audio-streamer-example/` based on the URL.
+## API Endpoints
 
-**Specify a custom name:**
+### Public Endpoints
+- `GET /` - Web interface
+- `POST /api/download` - Start a new download
+- `GET /api/status/{job_id}` - Get job status
+- `GET /api/jobs` - List all jobs
+- `DELETE /api/jobs/{job_id}` - Delete completed job
+- `POST /api/jobs/{job_id}/cancel` - Cancel active job
+- `GET /api/stream/{job_id}` - Stream browser mode download
+- `WebSocket /ws` - Real-time updates
 
-```bash
-python main.py https://example.com/audio-streamer-example my-audiobook
-```
-
-Downloads to `downloads/my-audiobook/` regardless of the URL structure.
-
-**Force specific scraper:**
-
-```bash
-python main.py https://example.com/audio-streamer-example my-audiobook -p plyr
-```
-
-Forces the use of the Plyr scraper, useful if auto-detection fails.
-
-**Control parallel downloads:**
-
-```bash
-python main.py https://example.com/audio-streamer-example my-audiobook -w 10
-```
-
-Downloads 10 files simultaneously for faster completion.
-
-**Reduce parallel downloads (for rate-limited sites):**
-
-```bash
-python main.py https://example.com/audio-streamer-example -w 1
-```
-
-Downloads only one file at a time to avoid overwhelming the server.
-
-### Output Example
-
-```
-Auto-detecting plugin...
-Detected plugin: plyr
-[Plyr Scraper] Starting scrape of: https://example.com/audiobook
-Fetching page content...
-Analyzing page for Plyr audio tracks...
-
-Fetching MP3 URLs from API for 26 tracks...
-
-Found 27 audio tracks:
-   1. Introduction                          https://example.com/files/intro.mp3
-   2. Chapter 01 - The Beginning           https://example.com/files/chapter01.mp3
-   3. Chapter 02 - The Journey             https://example.com/files/chapter02.mp3
-   ...
-
-Downloading to: downloads/my-audiobook/
-Total tracks to download: 27
-Parallel downloads: 5
---------------------------------------------------------------------------------
-[ 1/27] Introduction.mp3                         [██████████████████████████████] 100.0% ✓ Complete (1.2 MB)
-[ 2/27] Chapter-01-The-Beginning.mp3             [████████████████░░░░░░░░░░░░░░]  55.3% 35.6 MB/64.4 MB
-[ 3/27] Chapter-02-The-Journey.mp3               [██████░░░░░░░░░░░░░░░░░░░░░░░░]  21.7% 14.2 MB/65.3 MB
-...
-```
-
-## How It Works
-
-1. **Plugin Detection**: The main script analyzes the webpage to determine which audio player is being used
-2. **Track Extraction**: The appropriate scraper extracts track metadata (names, URLs, etc.)
-3. **URL Resolution**: For Plyr players, the scraper may need to make API calls to get actual MP3 URLs
-4. **Download Management**: The common downloader handles all files with consistent progress tracking
-5. **File Organization**: Files are saved to `downloads/[name]/` with sanitized filenames
+### Protected Endpoints (Require Authentication)
+- `POST /api/auth/login` - Login with admin password
+- `GET /api/downloads` - List server downloads
+- `DELETE /api/downloads/{name}` - Delete server download
+- `GET /api/downloads/{name}/zip` - Download as ZIP
 
 ## Architecture
 
-The project uses a modular plugin architecture:
+### Backend (FastAPI)
+- WebSocket support for real-time updates
+- JWT-based authentication for server mode
+- Async/await for efficient I/O operations
+- Background tasks for download processing
+- Streaming responses for large files
 
-- **`main.py`**: Entry point that detects plugins and coordinates the process
-- **`scrape_plyr.py`**: Handles Plyr.js-based audio players
-- **`simple_scrape_mp3.py`**: Handles direct MP3 links
-- **`downloader.py`**: Common download manager with progress tracking
+### Frontend
+- Vanilla JavaScript with WebSocket client
+- Real-time progress bars
+- Responsive design
+- No framework dependencies
 
-## Adding New Scrapers
+### Download Flow
 
-To support a new audio player type:
+#### Browser Mode
+1. User submits URL
+2. Backend scrapes audio links
+3. Creates streaming response
+4. Chunks audio files directly to browser
+5. No server storage required
 
-1. Create a new scraper file (e.g., `scrape_newplayer.py`)
-2. Implement a `scrape(url, prefix, directory)` function that returns a list of track dictionaries
-3. Each track dictionary should have at minimum: `{'url': 'http://...', 'name': 'Track Name'}`
-4. Update the detection logic in `main.py`
+#### Server Mode
+1. User authenticates with admin password
+2. Backend downloads files to server
+3. Files stored in `downloads/` directory
+4. User can download as ZIP later
+
+## Configuration
+
+### Environment Variables
+- `ADMIN_PASSWORD`: Password for server mode (default: "admin123")
+- `SECRET_KEY`: JWT secret key (default: auto-generated)
+- `ACCESS_TOKEN_EXPIRE_MINUTES`: Token expiry (default: 1440)
+
+### Download Settings
+- Workers: 1-20 parallel downloads (default: 5)
+- Timeout: 30 seconds per request
+- Chunk size: 8KB for streaming
+
+## Testing
+
+Run the test script:
+```bash
+python test_improved.py
+```
+
+This will test:
+- Authentication
+- Browser mode downloads
+- Server mode downloads
+- Download listing
+
+## Logging
+
+Logs are written to:
+- Console output (INFO level)
+- `audio_downloader.log` file (DEBUG level)
+
+Log format includes:
+- Timestamp
+- Log level
+- Job ID (when applicable)
+- Progress updates
+- Error details
+
+## Security Considerations
+
+1. **Authentication**: Server mode requires password
+2. **CORS**: Configure for production deployment
+3. **File paths**: Sanitized to prevent directory traversal
+4. **Rate limiting**: Consider adding for production
+5. **HTTPS**: Use reverse proxy with SSL in production
+
+## Deployment
+
+For VPS deployment:
+
+1. Use a reverse proxy (Nginx/Caddy)
+2. Enable SSL/TLS
+3. Set strong admin password
+4. Configure firewall rules
+5. Use process manager (systemd/supervisor)
+
+Example Nginx config:
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+    
+    location / {
+        proxy_pass http://localhost:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+    }
+}
+```
 
 ## Troubleshooting
 
-**Auto-detection fails:**
+### WebSocket Connection Issues
+- Check firewall allows WebSocket connections
+- Ensure reverse proxy forwards WebSocket headers
+- Check browser console for errors
 
-- Use the `-p` flag to manually specify the plugin
-- Check if the site uses a player type not yet supported
+### Download Failures
+- Check `audio_downloader.log` for details
+- Verify URL is accessible
+- Check audio player is supported
+- Ensure sufficient disk space (server mode)
 
-**Downloads fail:**
+### Authentication Issues
+- Verify ADMIN_PASSWORD environment variable
+- Check token hasn't expired
+- Clear browser localStorage if needed
 
-- Some sites may require authentication or have rate limiting
-- Try reducing parallel downloads with `-w 1` or `-w 2`
-- Check if the MP3 URLs are region-restricted
+## Future Enhancements
 
-**Directory already exists:**
-
-- The script prevents accidental overwrites
-- Remove the existing directory or choose a different name
-
-## Future Improvements
-
-Here are planned enhancements for the audio downloader:
-
-### Additional Player Support
-
-- **MediaElement.js**: Another popular HTML5 audio/video player
-- **Video.js**: Widely used open-source player
-- **Howler.js**: Web audio library used by many sites
-- **JW Player**: Commercial player with various protection mechanisms
-- **Spotify/Apple Music embeds**: For publicly available podcasts
-
-### Future Features
-
-- **Playlist support**: Save M3U/PLS playlists along with downloads
-- **Metadata extraction**: Save track information, album art, and descriptions
-- **Rate limiting**: Automatic adjustment based on server responses
-- **Proxy support**: Route downloads through proxy servers
-
-### Technical Enhancements
-
-- **Async downloads**: Use asyncio for better performance
-- **API mode**: Run as a service with REST API
-- **GUI version**: Simple graphical interface for non-technical users
-
-## Contributing
-
-Contributions are welcome! If you'd like to add support for a new player or feature:
-
-1. Fork the repository
-2. Create a feature branch
-3. Add your scraper or enhancement
-4. Submit a pull request
-
-## Web Application with Docker
-
-The project now includes a web interface that can be run as a containerized application using Docker.
-
-### Docker Setup
-
-1. **Build and run with Docker Compose:**
-   ```bash
-   docker-compose up -d
-   ```
-
-2. **Access the web interface:**
-   Open your browser and navigate to `http://localhost:8000`
-
-3. **View logs:**
-   ```bash
-   docker-compose logs -f
-   ```
-
-4. **Stop the application:**
-   ```bash
-   docker-compose down
-   ```
-
-### Web Interface Features
-
-- **Simple HTML/CSS frontend** - No JavaScript frameworks required
-- **Real-time progress tracking** - Monitor download progress for all tracks
-- **Job management** - View active and completed download jobs
-- **Download management** - Browse and delete completed downloads
-- **Auto-detection** - Same plugin detection as the CLI version
-- **Background processing** - Downloads continue even if you close the browser
-
-### Docker Configuration
-
-The `docker-compose.yml` file:
-- Maps port 8000 for web access
-- Mounts the `downloads` directory as a volume for persistent storage
-- Auto-restarts the container unless explicitly stopped
-
-### API Endpoints
-
-The FastAPI backend provides these endpoints:
-- `GET /` - Main web interface
-- `POST /api/download` - Start a new download job
-- `GET /api/status/{job_id}` - Check job status
-- `GET /api/jobs` - List all jobs
-- `DELETE /api/jobs/{job_id}` - Delete a completed job
-- `GET /api/downloads` - List completed downloads
-- `DELETE /api/downloads/{name}` - Delete a download
-
-## License
-
-This script is provided as-is under the MIT License. Feel free to modify and distribute.
+- [ ] Support more audio players
+- [ ] Batch URL processing
+- [ ] Download history
+- [ ] User management system
+- [ ] Progress persistence across restarts
+- [ ] Mobile app
+- [ ] Browser extension

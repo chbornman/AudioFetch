@@ -1,32 +1,40 @@
 #!/usr/bin/env python3
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, Depends, status
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, HttpUrl
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, AsyncGenerator
 import asyncio
 import os
 import shutil
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 import importlib
 import re
 from urllib.parse import urlparse
 import logging
 import zipfile
 from io import BytesIO
-from fastapi.responses import StreamingResponse
-import requests
-from typing import AsyncGenerator
 import aiohttp
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import json
+import secrets
+from passlib.context import CryptContext
+import jwt
+from jwt import PyJWTError
+from dotenv import load_dotenv
 
-# Configure logging
+# Load environment variables
+load_dotenv()
+
+# Configure logging with more detail
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('audio_downloader.log')
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -36,35 +44,39 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from player_info import get_player_info
 from downloader import download_tracks
 
-app = FastAPI(title="Audio Downloader", version="1.0.0")
+app = FastAPI(title="Audio Downloader", version="2.0.0")
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# Security setup
+security = HTTPBasic()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Configuration
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-here-change-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")  # Change this!
+
+# Store active websocket connections
+active_connections: Dict[str, WebSocket] = {}
+
 # Store download jobs and cancellation flags
 download_jobs = {}
 cancel_flags = {}
-# Store ZIP creation progress
-zip_progress = {}
-
-def update_job_progress(job_id: str, completed: int, failed: int):
-    """Update job progress during download."""
-    if job_id in download_jobs:
-        job = download_jobs[job_id]
-        if job.get('progress'):
-            job['progress']['completed'] = completed
-            job['progress']['failed'] = failed
 
 class DownloadRequest(BaseModel):
     url: HttpUrl
     name: Optional[str] = None
     plugin: Optional[str] = None
     workers: int = 5
-    download_mode: str = "server"  # "server" or "browser"
+    download_mode: str = "browser"  # "server" or "browser"
+    auth_token: Optional[str] = None  # For server mode
 
 class DownloadStatus(BaseModel):
     job_id: str
-    status: str  # pending, detecting, downloading, zipping, completed, error
+    status: str  # pending, detecting, downloading, streaming, completed, error, cancelled
     message: Optional[str] = None
     progress: Optional[Dict] = None
     result: Optional[Dict] = None
@@ -72,7 +84,127 @@ class DownloadStatus(BaseModel):
     completed_at: Optional[datetime] = None
     download_name: Optional[str] = None
     download_mode: Optional[str] = None
-    zip_ready: Optional[bool] = None
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class LoginRequest(BaseModel):
+    password: str
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def verify_token(token: str):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            return False
+        return True
+    except PyJWTError:
+        return False
+
+async def broadcast_job_update(job_id: str, job_data: dict):
+    """Broadcast job updates to all connected websockets."""
+    # Create a serializable copy of the job data
+    serializable_data = job_data.copy()
+    
+    # Convert datetime objects to ISO format strings
+    if 'created_at' in serializable_data and isinstance(serializable_data['created_at'], datetime):
+        serializable_data['created_at'] = serializable_data['created_at'].isoformat()
+    if 'completed_at' in serializable_data and isinstance(serializable_data['completed_at'], datetime):
+        serializable_data['completed_at'] = serializable_data['completed_at'].isoformat()
+    
+    # Remove non-serializable objects
+    serializable_data.pop('request', None)
+    serializable_data.pop('tracks', None)
+    
+    message = {
+        "type": "job_update",
+        "job_id": job_id,
+        "data": serializable_data
+    }
+    
+    disconnected = []
+    for conn_id, websocket in active_connections.items():
+        try:
+            await websocket.send_json(message)
+        except Exception as e:
+            logger.warning(f"Failed to send to websocket {conn_id}: {e}")
+            disconnected.append(conn_id)
+    
+    # Clean up disconnected websockets
+    for conn_id in disconnected:
+        active_connections.pop(conn_id, None)
+
+async def create_streaming_zip(tracks: List[Dict], name: str, job_id: str) -> BytesIO:
+    """Create a ZIP file in memory from track URLs."""
+    zip_buffer = BytesIO()
+    total_tracks = len(tracks)
+    completed = 0
+    failed = 0
+    
+    logger.info(f"[Job {job_id[:8]}] Starting to create ZIP with {total_tracks} tracks")
+    
+    async with aiohttp.ClientSession() as session:
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for idx, track in enumerate(tracks):
+                # Check if cancelled
+                if cancel_flags.get(job_id, False):
+                    logger.info(f"[Job {job_id[:8]}] Download cancelled")
+                    break
+                
+                try:
+                    filename = track.get('filename', track['url'].split('/')[-1])
+                    if not any(filename.endswith(ext) for ext in ['.mp3', '.m4a', '.aac', '.ogg', '.opus', '.webm', '.wav', '.flac']):
+                        filename += '.mp3'
+                    
+                    logger.info(f"[Job {job_id[:8]}] Downloading track {idx+1}/{total_tracks}: {filename}")
+                    
+                    # Download file
+                    async with session.get(track['url']) as response:
+                        response.raise_for_status()
+                        content = await response.read()
+                        
+                        # Add to ZIP
+                        zip_file.writestr(filename, content)
+                        completed += 1
+                        
+                        logger.info(f"[Job {job_id[:8]}] Successfully added {filename} to ZIP ({completed}/{total_tracks})")
+                        
+                        # Update job progress
+                        if job_id in download_jobs:
+                            download_jobs[job_id]['progress'] = {
+                                'total': total_tracks,
+                                'completed': completed,
+                                'failed': failed
+                            }
+                            await broadcast_job_update(job_id, download_jobs[job_id])
+                
+                except Exception as e:
+                    logger.error(f"[Job {job_id[:8]}] Failed to download {track.get('filename', 'unknown')}: {str(e)}")
+                    failed += 1
+                    
+                    # Update progress even on failure
+                    if job_id in download_jobs:
+                        download_jobs[job_id]['progress'] = {
+                            'total': total_tracks,
+                            'completed': completed,
+                            'failed': failed
+                        }
+                        await broadcast_job_update(job_id, download_jobs[job_id])
+    
+    logger.info(f"[Job {job_id[:8]}] ZIP creation complete: {completed} successful, {failed} failed")
+    zip_buffer.seek(0)
+    return zip_buffer
 
 def detect_plugin(url):
     """Detect which audio streaming plugin a website is using."""
@@ -80,6 +212,7 @@ def detect_plugin(url):
     from bs4 import BeautifulSoup
     
     try:
+        logger.info(f"Detecting plugin for URL: {url}")
         response = requests.get(str(url), timeout=30)
         response.raise_for_status()
         html = response.text.lower()
@@ -89,9 +222,11 @@ def detect_plugin(url):
         
         if 'plyr' in html or 'new plyr' in html:
             detections.append(('plyr', True))
+            logger.debug("Detected Plyr player")
         
         if 'howler' in html or 'howl(' in html or 'howler.js' in html:
             detections.append(('howler', False))
+            logger.debug("Detected Howler (unsupported)")
         
         mediaelement_patterns = [
             'mediaelement', 'mejsplayer', 'mejs', 'mejs-',
@@ -100,21 +235,27 @@ def detect_plugin(url):
         ]
         if any(pattern in html for pattern in mediaelement_patterns):
             detections.append(('mediaelement', False))
+            logger.debug("Detected MediaElement (unsupported)")
         
         if 'video-js' in html or 'videojs' in html:
             detections.append(('videojs', False))
+            logger.debug("Detected VideoJS (unsupported)")
         
         if 'jwplayer' in html or 'jwplatform' in html:
             detections.append(('jwplayer', False))
+            logger.debug("Detected JWPlayer (unsupported)")
         
         if '<audio' in html:
             detections.append(('html5audio', False))
+            logger.debug("Detected HTML5 Audio (unsupported)")
         
         if 'soundcloud.com' in html or 'soundcloud-widget' in html:
             detections.append(('soundcloud', False))
+            logger.debug("Detected SoundCloud (unsupported)")
         
         if 'spotify.com/embed' in html:
             detections.append(('spotify', False))
+            logger.debug("Detected Spotify (unsupported)")
         
         soup = BeautifulSoup(html_original, 'html.parser')
         mp3_links = soup.find_all(lambda tag: 
@@ -123,10 +264,13 @@ def detect_plugin(url):
         )
         if mp3_links:
             detections.append(('simple_mp3', True))
+            logger.debug(f"Detected {len(mp3_links)} direct MP3 links")
         
+        logger.info(f"Detection complete. Found {len(detections)} players")
         return detections
         
     except Exception as e:
+        logger.error(f"Error detecting plugin: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Error detecting plugin: {str(e)}")
 
 def generate_name_from_url(url: str) -> str:
@@ -144,11 +288,13 @@ def generate_name_from_url(url: str) -> str:
         from datetime import datetime
         name = f"audio-download-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     
+    logger.debug(f"Generated name from URL: {name}")
     return name
 
-def process_download(job_id: str, request: DownloadRequest):
+async def process_download(job_id: str, request: DownloadRequest):
     """Background task to process download."""
     job = download_jobs[job_id]
+    logger.info(f"[Job {job_id[:8]}] Starting download process in {request.download_mode} mode")
     
     try:
         # Generate name if not provided
@@ -156,13 +302,16 @@ def process_download(job_id: str, request: DownloadRequest):
             request.name = generate_name_from_url(str(request.url))
             job['status'] = 'detecting'
             job['message'] = f"Generated name: {request.name}"
-            print(f"[Job {job_id[:8]}] Generated name: {request.name}")
+            logger.info(f"[Job {job_id[:8]}] Generated name: {request.name}")
+            await broadcast_job_update(job_id, job)
         
         # Detect plugin if not specified
         if not request.plugin:
             job['status'] = 'detecting'
             job['message'] = "Detecting audio player..."
-            print(f"[Job {job_id[:8]}] Detecting audio player...")
+            logger.info(f"[Job {job_id[:8]}] Detecting audio player...")
+            await broadcast_job_update(job_id, job)
+            
             detections = detect_plugin(request.url)
             
             if not detections:
@@ -176,12 +325,14 @@ def process_download(job_id: str, request: DownloadRequest):
             
             request.plugin = supported[0][0]
             job['message'] = f"Detected player: {get_player_info(request.plugin)['name']}"
-            print(f"[Job {job_id[:8]}] Detected player: {get_player_info(request.plugin)['name']}")
+            logger.info(f"[Job {job_id[:8]}] Detected player: {get_player_info(request.plugin)['name']}")
+            await broadcast_job_update(job_id, job)
         
         # Import and run the scraper
         job['status'] = 'downloading'
         job['message'] = f"Scraping with {request.plugin} plugin..."
-        print(f"[Job {job_id[:8]}] Scraping with {request.plugin} plugin...")
+        logger.info(f"[Job {job_id[:8]}] Scraping with {request.plugin} plugin...")
+        await broadcast_job_update(job_id, job)
         
         if request.plugin == 'simple' or request.plugin == 'simple_mp3':
             module_name = 'simple_scrape_mp3'
@@ -207,42 +358,23 @@ def process_download(job_id: str, request: DownloadRequest):
         job['progress'] = {'total': len(tracks), 'completed': 0, 'failed': 0}
         job['download_mode'] = request.download_mode
         job['download_name'] = request.name
-        job['tracks'] = tracks  # Store tracks for browser mode
-        print(f"[Job {job_id[:8]}] Found {len(tracks)} tracks. Starting download in {request.download_mode} mode...")
+        job['tracks'] = tracks  # Store tracks for streaming
+        logger.info(f"[Job {job_id[:8]}] Found {len(tracks)} tracks. Starting download in {request.download_mode} mode...")
+        await broadcast_job_update(job_id, job)
         
         if request.download_mode == "browser":
-            # For browser mode, start creating the ZIP immediately
-            job['status'] = 'zipping'
-            job['message'] = f"Creating ZIP file for {len(tracks)} tracks..."
-            job['zip_ready'] = False
-            print(f"[Job {job_id[:8]}] Browser mode: Starting ZIP creation...")
-            
-            # Create ZIP synchronously in the background task
-            try:
-                # Use asyncio.run to execute the async function
-                import asyncio
-                zip_buffer = asyncio.run(create_streaming_zip(tracks, request.name, request.workers, job_id))
-                job['zip_buffer'] = zip_buffer
-                job['zip_ready'] = True
-                job['status'] = 'completed'
-                job['message'] = f"ZIP ready for download ({len(tracks)} tracks)"
-                job['result'] = {
-                    'successful': len(tracks),
-                    'failed': 0,
-                    'mode': 'browser',
-                    'zip_size': zip_buffer.getbuffer().nbytes
-                }
-                job['completed_at'] = datetime.now()
-                print(f"[Job {job_id[:8]}] Browser mode: ZIP ready for download")
-            except Exception as e:
-                job['status'] = 'error'
-                job['message'] = f"Failed to create ZIP: {str(e)}"
-                job['completed_at'] = datetime.now()
-                logger.error(f"[Job {job_id[:8]}] ZIP creation failed: {str(e)}")
-                import traceback
-                traceback.print_exc()
+            # For browser mode, we'll use WebSocket streaming
+            job['status'] = 'streaming'
+            job['message'] = f"Ready to stream {len(tracks)} tracks"
+            job['stream_ready'] = True
+            await broadcast_job_update(job_id, job)
+            logger.info(f"[Job {job_id[:8]}] Browser mode: Ready for streaming")
         else:
-            # Download tracks with progress callback and cancellation check
+            # Server mode - check authentication
+            if not request.auth_token or not verify_token(request.auth_token):
+                raise Exception("Authentication required for server downloads")
+            
+            # Download tracks with progress callback
             def update_progress(completed, failed):
                 # Check if cancelled
                 if cancel_flags.get(job_id, False):
@@ -252,6 +384,9 @@ def process_download(job_id: str, request: DownloadRequest):
                 job['progress']['completed'] = completed
                 job['progress']['failed'] = failed
                 logger.info(f"[Job {job_id[:8]}] Progress: {completed}/{len(tracks)} completed, {failed} failed")
+                
+                # Use asyncio to run the coroutine
+                asyncio.create_task(broadcast_job_update(job_id, job))
                 return True  # Continue downloading
             
             result = download_tracks(
@@ -267,15 +402,32 @@ def process_download(job_id: str, request: DownloadRequest):
             job['message'] = f"Downloaded {result['successful']} tracks successfully"
             job['result'] = result
             job['completed_at'] = datetime.now()
-            print(f"[Job {job_id[:8]}] Completed: {result['successful']} successful, {result['failed']} failed")
+            await broadcast_job_update(job_id, job)
+            logger.info(f"[Job {job_id[:8]}] Completed: {result['successful']} successful, {result['failed']} failed")
         
     except Exception as e:
         import traceback
         job['status'] = 'error'
         job['message'] = str(e)
         job['completed_at'] = datetime.now()
-        print(f"[Job {job_id[:8]}] Error: {str(e)}")
-        print(traceback.format_exc())
+        await broadcast_job_update(job_id, job)
+        logger.error(f"[Job {job_id[:8]}] Error: {str(e)}")
+        logger.error(traceback.format_exc())
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    connection_id = str(uuid.uuid4())
+    active_connections[connection_id] = websocket
+    logger.info(f"WebSocket connected: {connection_id}")
+    
+    try:
+        while True:
+            # Keep connection alive
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        active_connections.pop(connection_id, None)
+        logger.info(f"WebSocket disconnected: {connection_id}")
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -283,19 +435,44 @@ async def root():
     with open('static/index.html', 'r') as f:
         return f.read()
 
+@app.post("/api/auth/login")
+async def login(request: LoginRequest):
+    """Login endpoint for server download authentication."""
+    if request.password != ADMIN_PASSWORD:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": "admin"}, expires_delta=access_token_expires
+    )
+    logger.info("Admin login successful")
+    return {"access_token": access_token, "token_type": "bearer"}
+
 @app.post("/api/download", response_model=DownloadStatus)
 async def start_download(request: DownloadRequest, background_tasks: BackgroundTasks):
     """Start a new download job."""
     job_id = str(uuid.uuid4())
     
-    # Check if directory already exists
-    if request.name:
-        downloads_dir = os.path.join('downloads', request.name)
-        if os.path.exists(downloads_dir):
+    # For server mode, verify authentication
+    if request.download_mode == "server":
+        if not request.auth_token or not verify_token(request.auth_token):
             raise HTTPException(
-                status_code=400,
-                detail=f"Directory 'downloads/{request.name}' already exists. Please choose a different name."
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required for server downloads"
             )
+        
+        # Check if directory already exists
+        if request.name:
+            downloads_dir = os.path.join('downloads', request.name)
+            if os.path.exists(downloads_dir):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Directory 'downloads/{request.name}' already exists. Please choose a different name."
+                )
     
     # Create job entry
     download_jobs[job_id] = {
@@ -306,13 +483,67 @@ async def start_download(request: DownloadRequest, background_tasks: BackgroundT
         'result': None,
         'created_at': datetime.now(),
         'completed_at': None,
-        'request': request
+        'request': request,
+        'download_mode': request.download_mode
     }
+    
+    logger.info(f"[Job {job_id[:8]}] Created new download job in {request.download_mode} mode")
     
     # Start background task
     background_tasks.add_task(process_download, job_id, request)
     
     return DownloadStatus(**download_jobs[job_id])
+
+@app.get("/api/stream/{job_id}")
+async def stream_download(job_id: str):
+    """Stream download directly to browser."""
+    if job_id not in download_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job = download_jobs[job_id]
+    
+    if job.get('download_mode') != 'browser':
+        raise HTTPException(status_code=400, detail="This job is not in browser mode")
+    
+    if not job.get('stream_ready', False):
+        raise HTTPException(status_code=425, detail="Stream not ready yet")
+    
+    tracks = job.get('tracks', [])
+    if not tracks:
+        raise HTTPException(status_code=404, detail="No tracks found")
+    
+    logger.info(f"[Job {job_id[:8]}] Starting ZIP creation for {len(tracks)} tracks")
+    
+    # Update job status
+    job['status'] = 'downloading'
+    job['message'] = f"Creating ZIP file with {len(tracks)} tracks..."
+    await broadcast_job_update(job_id, job)
+    
+    # Create ZIP file
+    try:
+        zip_buffer = await create_streaming_zip(tracks, job.get('download_name', 'download'), job_id)
+        
+        # Update job status
+        job['status'] = 'completed'
+        job['message'] = f"Download complete!"
+        job['completed_at'] = datetime.now()
+        await broadcast_job_update(job_id, job)
+        
+        # Return the ZIP file
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename={job.get('download_name', 'download')}.zip",
+                "Content-Length": str(zip_buffer.getbuffer().nbytes)
+            }
+        )
+    except Exception as e:
+        job['status'] = 'error'
+        job['message'] = f"Download failed: {str(e)}"
+        job['completed_at'] = datetime.now()
+        await broadcast_job_update(job_id, job)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/status/{job_id}", response_model=DownloadStatus)
 async def get_status(job_id: str):
@@ -334,12 +565,14 @@ async def delete_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     
     job = download_jobs[job_id]
-    if job['status'] in ['pending', 'detecting', 'downloading']:
+    if job['status'] in ['pending', 'detecting', 'downloading', 'streaming']:
         raise HTTPException(status_code=400, detail="Cannot delete active job")
     
     del download_jobs[job_id]
     if job_id in cancel_flags:
         del cancel_flags[job_id]
+    
+    logger.info(f"[Job {job_id[:8]}] Job deleted")
     return {"message": "Job cleared"}
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -349,7 +582,7 @@ async def cancel_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     
     job = download_jobs[job_id]
-    if job['status'] not in ['pending', 'detecting', 'downloading']:
+    if job['status'] not in ['pending', 'detecting', 'downloading', 'streaming']:
         raise HTTPException(status_code=400, detail="Job is not active")
     
     # Set cancel flag
@@ -358,13 +591,20 @@ async def cancel_job(job_id: str):
     job['message'] = 'Download cancelled by user'
     job['completed_at'] = datetime.now()
     
+    await broadcast_job_update(job_id, job)
     logger.info(f"[Job {job_id[:8]}] Cancelled by user")
     
     return {"message": "Job cancelled"}
 
 @app.get("/api/downloads")
-async def list_downloads():
-    """List available downloads."""
+async def list_downloads(auth_token: Optional[str] = None):
+    """List available downloads (requires auth)."""
+    if not auth_token or not verify_token(auth_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+    
     downloads_dir = 'downloads'
     if not os.path.exists(downloads_dir):
         return []
@@ -373,7 +613,6 @@ async def list_downloads():
     for dir_name in os.listdir(downloads_dir):
         dir_path = os.path.join(downloads_dir, dir_name)
         if os.path.isdir(dir_path):
-            # Support multiple audio formats
             audio_extensions = ('.mp3', '.m4a', '.aac', '.ogg', '.opus', '.webm', '.wav', '.flac')
             files = [f for f in os.listdir(dir_path) if f.lower().endswith(audio_extensions)]
             downloads.append({
@@ -383,33 +622,38 @@ async def list_downloads():
                 'created': datetime.fromtimestamp(os.path.getctime(dir_path))
             })
     
-    # Sort by creation date, most recent first
     downloads.sort(key=lambda x: x['created'], reverse=True)
-    
     return downloads
 
 @app.delete("/api/downloads/{name}")
-async def delete_download(name: str):
-    """Delete a download directory."""
+async def delete_download(name: str, auth_token: Optional[str] = None):
+    """Delete a download directory (requires auth)."""
+    if not auth_token or not verify_token(auth_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+    
     dir_path = os.path.join('downloads', name)
     if not os.path.exists(dir_path):
         raise HTTPException(status_code=404, detail="Download not found")
     
     shutil.rmtree(dir_path)
+    logger.info(f"Deleted download directory: {name}")
     return {"message": "Download deleted"}
 
 @app.get("/api/downloads/{name}/zip")
-async def download_as_zip(name: str):
-    """Download all files in a directory as a ZIP file."""
-    logger.info(f"Attempting to download zip for: {name}")
+async def download_as_zip(name: str, auth_token: Optional[str] = None):
+    """Download all files in a directory as a ZIP file (requires auth)."""
+    if not auth_token or not verify_token(auth_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+    
+    logger.info(f"Creating ZIP for download: {name}")
     dir_path = os.path.join('downloads', name)
-    logger.info(f"Looking for directory: {dir_path}")
     if not os.path.exists(dir_path):
-        logger.error(f"Directory not found: {dir_path}")
-        # List what directories do exist
-        if os.path.exists('downloads'):
-            existing = os.listdir('downloads')
-            logger.info(f"Existing downloads: {existing}")
         raise HTTPException(status_code=404, detail="Download not found")
     
     # Create ZIP file in memory
@@ -422,9 +666,9 @@ async def download_as_zip(name: str):
                 zip_file.write(file_path, file)
     
     zip_buffer.seek(0)
-    
-    # Get the size of the buffer for Content-Length
     zip_size = zip_buffer.getbuffer().nbytes
+    
+    logger.info(f"ZIP created for {name}, size: {zip_size} bytes")
     
     return StreamingResponse(
         zip_buffer,
@@ -435,212 +679,15 @@ async def download_as_zip(name: str):
         }
     )
 
-async def download_file_to_memory(session: aiohttp.ClientSession, url: str, filename: str):
-    """Download a single file to memory."""
-    try:
-        async with session.get(url) as response:
-            response.raise_for_status()
-            content = await response.read()
-            return (filename, content, None)
-    except Exception as e:
-        logger.error(f"Failed to download {filename}: {str(e)}")
-        return (filename, None, str(e))
-
-async def create_streaming_zip(tracks: List[Dict], name: str, max_workers: int = 5, job_id: str = None):
-    """Create a ZIP file in memory from track URLs with progress tracking."""
-    zip_buffer = BytesIO()
-    total_tracks = len(tracks)
-    completed = 0
-    failed = 0
-    
-    # Initialize progress tracking
-    if job_id:
-        zip_progress[job_id] = {
-            'total': total_tracks,
-            'completed': 0,
-            'failed': 0,
-            'status': 'downloading'
-        }
-    
-    logger.info(f"Starting ZIP creation for {total_tracks} tracks")
-    
-    async with aiohttp.ClientSession() as session:
-        # Download files in batches
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for i in range(0, len(tracks), max_workers):
-                batch = tracks[i:i + max_workers]
-                batch_start = i
-                tasks = []
-                
-                logger.info(f"Processing batch {i//max_workers + 1}/{(total_tracks + max_workers - 1)//max_workers} (tracks {i+1}-{min(i+len(batch), total_tracks)})")
-                
-                for track in batch:
-                    filename = track.get('filename', track['url'].split('/')[-1])
-                    if not any(filename.endswith(ext) for ext in ['.mp3', '.m4a', '.aac', '.ogg', '.opus', '.webm', '.wav', '.flac']):
-                        filename += '.mp3'
-                    tasks.append(download_file_to_memory(session, track['url'], filename))
-                
-                results = await asyncio.gather(*tasks)
-                
-                for idx, (filename, content, error) in enumerate(results):
-                    if content:
-                        zip_file.writestr(filename, content)
-                        completed += 1
-                        logger.info(f"Added to ZIP: {filename} ({completed}/{total_tracks})")
-                    else:
-                        failed += 1
-                        logger.warning(f"Failed to download {filename}: {error} ({completed}/{total_tracks} completed, {failed} failed)")
-                    
-                    # Update progress
-                    if job_id:
-                        zip_progress[job_id]['completed'] = completed
-                        zip_progress[job_id]['failed'] = failed
-    
-    # Mark as complete
-    if job_id:
-        zip_progress[job_id]['status'] = 'complete'
-    
-    logger.info(f"ZIP creation complete: {completed} successful, {failed} failed out of {total_tracks} total")
-    
-    zip_buffer.seek(0)
-    return zip_buffer
-
-@app.get("/api/jobs/{job_id}/zip-progress")
-async def get_zip_progress(job_id: str):
-    """Get ZIP creation progress for a job."""
-    if job_id not in zip_progress:
-        return {"status": "not_started"}
-    return zip_progress[job_id]
-
-@app.get("/api/jobs/{job_id}/download-zip")
-async def download_job_as_zip(job_id: str):
-    """Download a browser mode job as ZIP."""
-    if job_id not in download_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    job = download_jobs[job_id]
-    
-    # Check if job is in browser mode
-    if job.get('download_mode') != 'browser':
-        raise HTTPException(status_code=400, detail="This job is not in browser download mode")
-    
-    # Check if ZIP is ready
-    if not job.get('zip_ready', False):
-        raise HTTPException(status_code=425, detail="ZIP file is still being created. Please wait.")
-    
-    if not job.get('zip_buffer'):
-        raise HTTPException(status_code=500, detail="ZIP buffer not found")
-    
-    # Get the pre-created ZIP buffer
-    zip_buffer = job['zip_buffer']
-    zip_buffer.seek(0)  # Reset to beginning
-    
-    # Get the size for Content-Length
-    zip_size = zip_buffer.getbuffer().nbytes
-    logger.info(f"Serving pre-created ZIP, size: {zip_size} bytes")
-    
-    # Clean up progress tracking
-    if job_id in zip_progress:
-        del zip_progress[job_id]
-    
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": f"attachment; filename={job['download_name']}.zip",
-            "Content-Length": str(zip_size)
-        }
-    )
-
-@app.post("/api/stream-download")
-async def stream_download(request: DownloadRequest):
-    """Stream download directly to browser as ZIP without saving to server."""
-    try:
-        # Generate name if not provided
-        if not request.name:
-            request.name = generate_name_from_url(str(request.url))
-            logger.info(f"Generated name: {request.name}")
-        
-        # Detect plugin if not specified
-        if not request.plugin:
-            logger.info("Detecting audio player...")
-            detections = detect_plugin(request.url)
-            
-            if not detections:
-                raise HTTPException(status_code=400, detail="Could not detect any audio player on this page")
-            
-            # Find first supported plugin
-            supported = [d for d in detections if d[1]]
-            if not supported:
-                unsupported_names = [get_player_info(d[0])['name'] for d in detections]
-                raise HTTPException(status_code=400, detail=f"Detected unsupported players: {', '.join(unsupported_names)}")
-            
-            request.plugin = supported[0][0]
-            logger.info(f"Detected player: {get_player_info(request.plugin)['name']}")
-        
-        # Import and run the scraper
-        logger.info(f"Scraping with {request.plugin} plugin...")
-        
-        if request.plugin == 'simple' or request.plugin == 'simple_mp3':
-            module_name = 'simple_scrape_mp3'
-        elif request.plugin == 'plyr':
-            module_name = 'scrape_plyr'
-        else:
-            raise HTTPException(status_code=400, detail=f"Unknown plugin: {request.plugin}")
-        
-        try:
-            scraper = importlib.import_module(module_name)
-        except ImportError as e:
-            raise HTTPException(status_code=400, detail=f"Failed to import scraper module '{module_name}': {str(e)}")
-        
-        try:
-            tracks = scraper.scrape(str(request.url), request.name, request.name)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Scraper error: {str(e)}")
-        
-        if not tracks:
-            raise HTTPException(status_code=400, detail="No tracks found to download")
-        
-        logger.info(f"Found {len(tracks)} tracks. Creating streaming ZIP...")
-        
-        # Create ZIP in memory and stream it
-        zip_buffer = await create_streaming_zip(tracks, request.name, request.workers)
-        
-        # Get the size of the buffer for Content-Length
-        zip_size = zip_buffer.getbuffer().nbytes
-        logger.info(f"ZIP created, size: {zip_size} bytes")
-        
-        return StreamingResponse(
-            zip_buffer,
-            media_type="application/zip",
-            headers={
-                "Content-Disposition": f"attachment; filename={request.name}.zip",
-                "Content-Length": str(zip_size)
-            }
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Stream download error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.on_event("startup")
-async def startup_event():
-    """Run on startup."""
-    print("=" * 60)
-    print("Audio Downloader Web App Started")
-    print("Access the app at: http://localhost:8000")
-    print("=" * 60)
-
 @app.on_event("startup")
 async def startup_event():
     """Log startup message."""
-    logger.info("Audio Downloader API started successfully!")
+    logger.info("=" * 60)
+    logger.info("Audio Downloader API v2.0 started successfully!")
     logger.info("Access the web interface at http://localhost:8000")
+    logger.info(f"Admin password is: {ADMIN_PASSWORD}")
+    logger.info("=" * 60)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info", reload=True)

@@ -1,422 +1,358 @@
-// API base URL
-const API_BASE = '/api';
+// Audio Downloader Frontend v2.0
+let ws = null;
+let authToken = null;
+let isAuthenticated = false;
 
-// Store active job IDs for polling
-const activeJobs = new Set();
+// Initialize WebSocket connection
+function initWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    
+    ws.onopen = () => {
+        console.log('WebSocket connected');
+        updateConnectionStatus(true);
+    };
+    
+    ws.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === 'job_update') {
+            updateJobInList(message.job_id, message.data);
+        }
+    };
+    
+    ws.onclose = () => {
+        console.log('WebSocket disconnected');
+        updateConnectionStatus(false);
+        // Reconnect after 3 seconds
+        setTimeout(initWebSocket, 3000);
+    };
+    
+    ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+    };
+}
 
-// Store jobs that should auto-download when ready
-const autoDownloadJobs = new Set();
-
-// Helper function to fetch ZIP progress
-async function fetchZipProgress(jobId) {
-    try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/zip-progress`);
-        return await response.json();
-    } catch (error) {
-        return { status: 'error' };
+function updateConnectionStatus(connected) {
+    const statusEl = document.getElementById('connection-status');
+    if (statusEl) {
+        statusEl.textContent = connected ? '🟢 Connected' : '🔴 Disconnected';
     }
 }
 
-// Helper function to format bytes
-function formatBytes(bytes) {
-    if (!bytes) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+// Authentication
+async function login() {
+    const password = document.getElementById('admin-password').value;
+    
+    try {
+        const response = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password })
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            authToken = data.access_token;
+            isAuthenticated = true;
+            localStorage.setItem('authToken', authToken);
+            showAuthenticatedUI();
+            showNotification('Login successful!', 'success');
+        } else {
+            showNotification('Invalid password', 'error');
+        }
+    } catch (error) {
+        console.error('Login error:', error);
+        showNotification('Login failed', 'error');
+    }
 }
 
-// Initialize the app
-document.addEventListener('DOMContentLoaded', () => {
-    const form = document.getElementById('downloadForm');
-    form.addEventListener('submit', handleFormSubmit);
-    
-    // Load initial data
-    loadJobs();
-    loadDownloads();
-    
-    // Start polling for active jobs
-    setInterval(pollActiveJobs, 2000);
-});
+function logout() {
+    authToken = null;
+    isAuthenticated = false;
+    localStorage.removeItem('authToken');
+    showUnauthenticatedUI();
+    showNotification('Logged out', 'info');
+}
 
-// Handle form submission
-async function handleFormSubmit(e) {
-    e.preventDefault();
+function showAuthenticatedUI() {
+    document.getElementById('auth-section').style.display = 'none';
+    document.getElementById('server-mode-option').style.display = 'block';
+    document.getElementById('server-downloads-section').style.display = 'block';
+    loadServerDownloads();
+}
+
+function showUnauthenticatedUI() {
+    document.getElementById('auth-section').style.display = 'block';
+    document.getElementById('server-mode-option').style.display = 'none';
+    document.getElementById('server-downloads-section').style.display = 'none';
+    document.getElementById('download-mode').value = 'browser';
+}
+
+// Download functionality
+async function startDownload() {
+    const url = document.getElementById('url').value;
+    const name = document.getElementById('name').value;
+    const plugin = document.getElementById('plugin').value;
+    const workers = parseInt(document.getElementById('workers').value) || 5;
+    const downloadMode = document.getElementById('download-mode').value;
     
-    const formData = new FormData(e.target);
-    const data = {
-        url: formData.get('url'),
-        name: formData.get('name') || null,
-        plugin: formData.get('plugin') || null,
-        workers: parseInt(formData.get('workers')),
-        download_mode: formData.get('downloadMode') || 'server'
+    if (!url) {
+        showNotification('Please enter a URL', 'error');
+        return;
+    }
+    
+    const requestData = {
+        url,
+        name: name || null,
+        plugin: plugin || null,
+        workers,
+        download_mode: downloadMode,
+        auth_token: downloadMode === 'server' ? authToken : null
     };
     
     try {
-        const response = await fetch(`${API_BASE}/download`, {
+        const response = await fetch('/api/download', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(data)
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestData)
         });
         
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Failed to start download');
-        }
-        
-        const job = await response.json();
-        activeJobs.add(job.job_id);
-        
-        // Mark browser mode jobs for auto-download
-        if (data.download_mode === 'browser') {
-            autoDownloadJobs.add(job.job_id);
-        }
-        
-        // Clear form
-        e.target.reset();
-        
-        // Reload jobs list
-        loadJobs();
-        
-    } catch (error) {
-        alert(`Error: ${error.message}`);
-    }
-}
-
-// Load all jobs
-async function loadJobs() {
-    try {
-        const response = await fetch(`${API_BASE}/jobs`);
-        const jobs = await response.json();
-        
-        const jobsList = document.getElementById('jobsList');
-        
-        if (jobs.length === 0) {
-            jobsList.innerHTML = '<p class="empty-state">No active jobs</p>';
-            return;
-        }
-        
-        // Clear active jobs and rebuild
-        activeJobs.clear();
-        
-        jobsList.innerHTML = jobs.map(job => {
-            // Track active jobs
-            if (['pending', 'detecting', 'downloading', 'zipping'].includes(job.status)) {
-                activeJobs.add(job.job_id);
-            }
+        if (response.ok) {
+            const job = await response.json();
+            addJobToList(job);
             
-            return createJobElement(job);
-        }).join('');
-        
+            // Clear form
+            document.getElementById('url').value = '';
+            document.getElementById('name').value = '';
+            
+            if (downloadMode === 'browser') {
+                showNotification('Download started! The file will stream directly to your browser.', 'success');
+            } else {
+                showNotification('Download started! Files will be saved to the server.', 'success');
+            }
+        } else {
+            const error = await response.json();
+            showNotification(error.detail || 'Failed to start download', 'error');
+        }
     } catch (error) {
-        console.error('Failed to load jobs:', error);
+        console.error('Download error:', error);
+        showNotification('Failed to start download', 'error');
     }
 }
 
-// Create job element HTML
+// Job management
+function addJobToList(job) {
+    const jobsList = document.getElementById('jobs-list');
+    const jobElement = createJobElement(job);
+    jobsList.insertBefore(jobElement, jobsList.firstChild);
+}
+
+function updateJobInList(jobId, jobData) {
+    const jobElement = document.getElementById(`job-${jobId}`);
+    if (jobElement) {
+        const updatedElement = createJobElement(jobData);
+        jobElement.replaceWith(updatedElement);
+    }
+}
+
 function createJobElement(job) {
-    const statusClass = `status-${job.status}`;
-    const createdAt = new Date(job.created_at).toLocaleString();
+    const div = document.createElement('div');
+    div.id = `job-${job.job_id}`;
+    div.className = `job-item ${job.status}`;
     
     let progressHtml = '';
-    if (job.progress && job.progress.total > 0) {
-        const percent = (job.progress.completed / job.progress.total) * 100;
+    if (job.progress) {
+        const percentage = Math.round((job.progress.completed / job.progress.total) * 100);
         progressHtml = `
-            <div class="progress-bar">
-                <div class="progress-fill" style="width: ${percent}%"></div>
-            </div>
-            <div>Progress: ${job.progress.completed}/${job.progress.total} tracks (${job.progress.failed} failed)</div>
-        `;
-    }
-    
-    // Special handling for zipping status
-    if (job.status === 'zipping' && job.download_mode === 'browser') {
-        // Auto-fetch ZIP progress
-        fetchZipProgress(job.job_id).then(progress => {
-            if (progress.status === 'downloading') {
-                const percent = Math.round((progress.completed / progress.total) * 100);
-                progressHtml = `
-                    <div class="progress-bar">
-                        <div class="progress-fill" style="width: ${percent}%"></div>
-                    </div>
-                    <div>Creating ZIP: ${progress.completed}/${progress.total} tracks (${percent}%)</div>
-                `;
-            }
-        });
-    }
-    
-    let resultHtml = '';
-    if (job.result) {
-        resultHtml = `
-            <div class="job-details">
-                <strong>Result:</strong> ${job.result.successful} successful, ${job.result.failed} failed
+            <div class="progress-container">
+                <div class="progress-bar" style="width: ${percentage}%"></div>
+                <span class="progress-text">${job.progress.completed}/${job.progress.total} tracks (${percentage}%)</span>
             </div>
         `;
     }
     
-    let actionHtml = '';
-    if (job.status === 'completed' || job.status === 'error' || job.status === 'cancelled') {
-        // Show Clear button for completed/error/cancelled jobs
-        if (job.status === 'completed' && job.result && job.result.successful > 0) {
-            // Check if browser mode
-            if (job.download_mode === 'browser') {
-                if (job.zip_ready) {
-                    // ZIP is ready, show download button
-                    actionHtml = `
-                        <button class="btn btn-primary btn-small" onclick="downloadJobAsZip('${job.job_id}')">
-                            Download ZIP (${formatBytes(job.result.zip_size)})
-                        </button>
-                        <button class="btn btn-danger btn-small" onclick="clearJob('${job.job_id}')">
-                            Clear
-                        </button>
-                    `;
-                } else {
-                    // ZIP not ready yet, just show clear button
-                    actionHtml = `
-                        <button class="btn btn-danger btn-small" onclick="clearJob('${job.job_id}')">
-                            Clear
-                        </button>
-                    `;
-                }
-            } else {
-                const downloadName = job.download_name || job.job_id.substring(0, 8);
-                actionHtml = `
-                    <button class="btn btn-primary btn-small" onclick="downloadAsZip('${downloadName}')">
-                        Download ZIP
-                    </button>
-                    <button class="btn btn-danger btn-small" onclick="clearJob('${job.job_id}')">
-                        Clear
-                    </button>
-                `;
-            }
-        } else {
-            actionHtml = `
-                <button class="btn btn-danger btn-small" onclick="clearJob('${job.job_id}')">
-                    Clear
-                </button>
-            `;
-        }
-    } else {
-        // Show Cancel button for active jobs
-        actionHtml = `
-            <button class="btn btn-danger btn-small" onclick="cancelJob('${job.job_id}')">
-                Cancel
-            </button>
-        `;
+    let actionsHtml = '';
+    if (job.status === 'pending' || job.status === 'detecting' || job.status === 'downloading') {
+        actionsHtml = `<button onclick="cancelJob('${job.job_id}')" class="btn-cancel">Cancel</button>`;
+    } else if (job.status === 'streaming' && job.download_mode === 'browser') {
+        actionsHtml = `<button onclick="streamDownload('${job.job_id}')" class="btn-download">Download</button>`;
+    } else if (job.status === 'completed' || job.status === 'error' || job.status === 'cancelled') {
+        actionsHtml = `<button onclick="clearJob('${job.job_id}')" class="btn-clear">Clear</button>`;
     }
     
-    const downloadModeHtml = job.download_mode ? `<div>Mode: ${job.download_mode === 'browser' ? 'Stream to Browser' : 'Download to Server'}</div>` : '';
-    
-    return `
-        <div class="job-item">
-            <div class="job-header">
-                <div class="job-title">Job ${job.job_id.substring(0, 8)}</div>
-                <span class="job-status ${statusClass}">${job.status}</span>
-            </div>
-            <div class="job-details">
-                <div>Created: ${createdAt}</div>
-                ${downloadModeHtml}
-                ${job.message ? `<div class="job-message">${job.message}</div>` : ''}
-                ${progressHtml}
-                ${resultHtml}
-            </div>
-            ${actionHtml}
+    div.innerHTML = `
+        <div class="job-header">
+            <span class="job-name">${job.download_name || 'Unnamed'}</span>
+            <span class="job-status ${job.status}">${job.status}</span>
+            <span class="job-mode">${job.download_mode || 'browser'}</span>
         </div>
+        <div class="job-message">${job.message || ''}</div>
+        ${progressHtml}
+        <div class="job-actions">${actionsHtml}</div>
+        <div class="job-time">${formatTime(job.created_at)}</div>
     `;
+    
+    return div;
 }
 
-// Poll active jobs for updates
-async function pollActiveJobs() {
-    if (activeJobs.size === 0) return;
+async function streamDownload(jobId) {
+    // Create a hidden link and click it to start download
+    const link = document.createElement('a');
+    link.href = `/api/stream/${jobId}`;
+    link.download = true;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
     
-    for (const jobId of activeJobs) {
-        try {
-            const response = await fetch(`${API_BASE}/status/${jobId}`);
-            const job = await response.json();
-            
-            // Update job element
-            const jobsList = document.getElementById('jobsList');
-            const existingJobs = Array.from(jobsList.children);
-            
-            // Find and update the specific job
-            const jobElement = existingJobs.find(el => 
-                el.textContent.includes(jobId.substring(0, 8))
-            );
-            
-            if (jobElement) {
-                jobElement.outerHTML = createJobElement(job);
-            }
-            
-            // Remove from active jobs if completed
-            if (!['pending', 'detecting', 'downloading', 'zipping'].includes(job.status)) {
-                activeJobs.delete(jobId);
-                
-                // Handle browser mode auto-download
-                if (job.status === 'completed' && job.download_mode === 'browser' && job.zip_ready) {
-                    // Check if this job should auto-download
-                    if (autoDownloadJobs.has(jobId)) {
-                        autoDownloadJobs.delete(jobId);
-                        // Trigger download automatically
-                        setTimeout(() => {
-                            window.location.href = `${API_BASE}/jobs/${jobId}/download-zip`;
-                        }, 500);
-                    }
-                }
-                
-                // Reload downloads if job completed successfully (server mode only)
-                if (job.status === 'completed' && job.download_mode !== 'browser') {
-                    loadDownloads();
-                }
-            }
-            
-        } catch (error) {
-            console.error(`Failed to poll job ${jobId}:`, error);
+    showNotification('Streaming download started!', 'success');
+}
+
+async function cancelJob(jobId) {
+    try {
+        const response = await fetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
+        if (response.ok) {
+            showNotification('Job cancelled', 'info');
         }
+    } catch (error) {
+        console.error('Cancel error:', error);
     }
 }
 
-// Clear a completed job
 async function clearJob(jobId) {
     try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}`, {
-            method: 'DELETE'
-        });
-        
-        if (!response.ok) {
-            throw new Error('Failed to clear job');
+        const response = await fetch(`/api/jobs/${jobId}`, { method: 'DELETE' });
+        if (response.ok) {
+            document.getElementById(`job-${jobId}`).remove();
         }
-        
-        loadJobs();
-        
     } catch (error) {
-        alert(`Error: ${error.message}`);
+        console.error('Clear error:', error);
     }
 }
 
-// Cancel an active job
-async function cancelJob(jobId) {
-    if (!confirm('Cancel this download?')) return;
+// Server downloads management
+async function loadServerDownloads() {
+    if (!isAuthenticated) return;
     
     try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/cancel`, {
-            method: 'POST'
-        });
-        
-        if (!response.ok) {
-            throw new Error('Failed to cancel job');
+        const response = await fetch(`/api/downloads?auth_token=${authToken}`);
+        if (response.ok) {
+            const downloads = await response.json();
+            displayServerDownloads(downloads);
         }
-        
-        loadJobs();
-        
     } catch (error) {
-        alert(`Error: ${error.message}`);
+        console.error('Load downloads error:', error);
     }
 }
 
-// State for showing all downloads
-let showAllDownloads = false;
-
-// Load completed downloads
-async function loadDownloads() {
-    try {
-        const response = await fetch(`${API_BASE}/downloads`);
-        const downloads = await response.json();
-        
-        const downloadsList = document.getElementById('downloadsList');
-        const toggleButton = document.getElementById('toggleDownloads');
-        
-        if (downloads.length === 0) {
-            downloadsList.innerHTML = '<p class="empty-state">No downloads yet</p>';
-            toggleButton.style.display = 'none';
-            return;
-        }
-        
-        // Show/hide toggle button based on number of downloads
-        const INITIAL_SHOW = 5;
-        if (downloads.length > INITIAL_SHOW) {
-            toggleButton.style.display = 'block';
-            toggleButton.textContent = showAllDownloads ? 'Show Less' : `Show All (${downloads.length})`;
-        } else {
-            toggleButton.style.display = 'none';
-        }
-        
-        // Determine which downloads to show
-        const downloadsToShow = showAllDownloads ? downloads : downloads.slice(0, INITIAL_SHOW);
-        
-        downloadsList.innerHTML = downloadsToShow.map(download => {
-            const createdAt = new Date(download.created).toLocaleString();
-            const sizeInMB = (download.size / (1024 * 1024)).toFixed(2);
-            
-            return `
-                <div class="download-item">
-                    <div class="download-header">
-                        <div class="download-title">${download.name}</div>
-                    </div>
-                    <div class="download-details">
-                        <div>Files: ${download.files}</div>
-                        <div>Size: ${sizeInMB} MB</div>
-                        <div>Created: ${createdAt}</div>
-                    </div>
-                    <div class="download-actions">
-                        <button class="btn btn-primary btn-small" onclick="downloadAsZip('${download.name}')">
-                            Download ZIP
-                        </button>
-                        <button class="btn btn-danger btn-small" onclick="deleteDownload('${download.name}')">
-                            Delete
-                        </button>
-                    </div>
-                </div>
-            `;
-        }).join('');
-        
-    } catch (error) {
-        console.error('Failed to load downloads:', error);
+function displayServerDownloads(downloads) {
+    const container = document.getElementById('server-downloads-list');
+    container.innerHTML = '';
+    
+    if (downloads.length === 0) {
+        container.innerHTML = '<p>No server downloads yet</p>';
+        return;
     }
+    
+    downloads.forEach(download => {
+        const div = document.createElement('div');
+        div.className = 'download-item';
+        div.innerHTML = `
+            <div class="download-info">
+                <span class="download-name">${download.name}</span>
+                <span class="download-stats">${download.files} files, ${formatSize(download.size)}</span>
+                <span class="download-time">${formatTime(download.created)}</span>
+            </div>
+            <div class="download-actions">
+                <button onclick="downloadAsZip('${download.name}')" class="btn-download">Download ZIP</button>
+                <button onclick="deleteDownload('${download.name}')" class="btn-delete">Delete</button>
+            </div>
+        `;
+        container.appendChild(div);
+    });
 }
 
-// Toggle showing all downloads
-function toggleAllDownloads() {
-    showAllDownloads = !showAllDownloads;
-    loadDownloads();
+async function downloadAsZip(name) {
+    window.open(`/api/downloads/${name}/zip?auth_token=${authToken}`);
 }
 
-// Delete a download
 async function deleteDownload(name) {
     if (!confirm(`Delete download "${name}"?`)) return;
     
     try {
-        const response = await fetch(`${API_BASE}/downloads/${encodeURIComponent(name)}`, {
+        const response = await fetch(`/api/downloads/${name}?auth_token=${authToken}`, {
             method: 'DELETE'
         });
-        
-        if (!response.ok) {
-            throw new Error('Failed to delete download');
+        if (response.ok) {
+            showNotification('Download deleted', 'info');
+            loadServerDownloads();
         }
-        
-        loadDownloads();
-        
     } catch (error) {
-        alert(`Error: ${error.message}`);
+        console.error('Delete error:', error);
     }
 }
 
-// Download as ZIP
-async function downloadAsZip(name) {
-    try {
-        window.location.href = `${API_BASE}/downloads/${encodeURIComponent(name)}/zip`;
-    } catch (error) {
-        alert(`Error: ${error.message}`);
-    }
+// Utility functions
+function showNotification(message, type = 'info') {
+    const notification = document.createElement('div');
+    notification.className = `notification ${type}`;
+    notification.textContent = message;
+    document.getElementById('notifications').appendChild(notification);
+    
+    setTimeout(() => {
+        notification.remove();
+    }, 5000);
 }
 
-// Download job as ZIP (browser mode)
-async function downloadJobAsZip(jobId) {
+function formatTime(timestamp) {
+    const date = new Date(timestamp);
+    return date.toLocaleString();
+}
+
+function formatSize(bytes) {
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let size = bytes;
+    let unitIndex = 0;
+    
+    while (size >= 1024 && unitIndex < units.length - 1) {
+        size /= 1024;
+        unitIndex++;
+    }
+    
+    return `${size.toFixed(1)} ${units[unitIndex]}`;
+}
+
+// Initialize on load
+document.addEventListener('DOMContentLoaded', () => {
+    // Check for saved auth token
+    const savedToken = localStorage.getItem('authToken');
+    if (savedToken) {
+        authToken = savedToken;
+        isAuthenticated = true;
+        showAuthenticatedUI();
+    } else {
+        showUnauthenticatedUI();
+    }
+    
+    // Initialize WebSocket
+    initWebSocket();
+    
+    // Load initial jobs
+    loadJobs();
+    
+    // Set up auto-refresh for jobs
+    setInterval(loadJobs, 5000);
+});
+
+async function loadJobs() {
     try {
-        // Simple download - the ZIP is already created
-        window.location.href = `${API_BASE}/jobs/${jobId}/download-zip`;
+        const response = await fetch('/api/jobs');
+        if (response.ok) {
+            const jobs = await response.json();
+            const jobsList = document.getElementById('jobs-list');
+            jobsList.innerHTML = '';
+            jobs.forEach(job => addJobToList(job));
+        }
     } catch (error) {
-        alert(`Error: ${error.message}`);
+        console.error('Load jobs error:', error);
     }
 }

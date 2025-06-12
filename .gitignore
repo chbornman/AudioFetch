@@ -4,23 +4,23 @@ __pycache__/
 *$py.class
 *.so
 .Python
-env/
 venv/
-ENV/
-.venv
+env/
+*.egg-info/
+dist/
+build/
 
-# Virtual environments
-bin/
-lib/
-include/
-pyvenv.cfg
+# Environment variables
+.env
+.env.local
+.env.*.local
 
-# Downloads folder
+# Logs
+*.log
+logs/
+
+# Downloads directory
 downloads/
-
-# Test directories
-the-well-of-ascension/
-the-well-of-ascension-test/
 
 # IDE
 .vscode/
@@ -33,5 +33,10 @@ the-well-of-ascension-test/
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+
+# Docker
+*.pid

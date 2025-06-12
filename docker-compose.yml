@@ -2,14 +2,22 @@ services:
   web:
     build: .
     ports:
-      - "8000:8000"
+      - "${PORT:-8000}:${PORT:-8000}"
     volumes:
-      # Change the left side to any path on your host machine
-      # Examples:
-      # - /home/username/audiobooks:/app/downloads
-      # - /mnt/storage/audio:/app/downloads
-      # - /Volumes/NAS/audiobooks:/app/downloads
-      - ./downloads:/app/downloads
+      # Downloads directory mapping (configure in .env file)
+      - ${DOWNLOADS_HOST_PATH:-./downloads}:${DOWNLOADS_CONTAINER_PATH:-/app/downloads}
     environment:
-      - PYTHONUNBUFFERED=1
-    command: uvicorn app:app --host 0.0.0.0 --port 8000 --log-level info --reload
+      - PYTHONUNBUFFERED=${PYTHONUNBUFFERED:-1}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - SECRET_KEY=${SECRET_KEY}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      - PORT=${PORT:-8000}
+      - HOST=${HOST:-0.0.0.0}
+    env_file:
+      - .env
+    command: >
+      uvicorn app:app 
+      --host ${HOST:-0.0.0.0} 
+      --port ${PORT:-8000} 
+      --log-level ${LOG_LEVEL:-info}
+      ${AUTO_RELOAD:+--reload}
