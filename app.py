@@ -145,66 +145,162 @@ async def broadcast_job_update(job_id: str, job_data: dict):
     for conn_id in disconnected:
         active_connections.pop(conn_id, None)
 
-async def create_streaming_zip(tracks: List[Dict], name: str, job_id: str) -> BytesIO:
-    """Create a ZIP file in memory from track URLs."""
-    zip_buffer = BytesIO()
-    total_tracks = len(tracks)
+async def stream_zip_truly(tracks: List[Dict], job_id: str) -> AsyncGenerator[bytes, None]:
+    """
+    True streaming ZIP generation - sends data as soon as it's downloaded.
+    """
+    import struct
+    import zlib
+    import time
+    
+    def create_local_header(filename: str, size: int, crc: int) -> bytes:
+        """Create ZIP local file header"""
+        dt = time.localtime()
+        dosdate = (dt.tm_year - 1980) << 9 | dt.tm_mon << 5 | dt.tm_mday
+        dostime = dt.tm_hour << 11 | dt.tm_min << 5 | (dt.tm_sec // 2)
+        
+        header = struct.pack(
+            '<4sHHHHHIIIHH',  # Local file header format
+            b'PK\x03\x04',  # Local file header signature
+            0x14,  # Version needed to extract (2.0)
+            0,   # General purpose bit flag
+            0,   # Compression method (0 = stored)
+            dostime,  # Last mod file time
+            dosdate,  # Last mod file date
+            crc,  # CRC-32
+            size,  # Compressed size
+            size,  # Uncompressed size
+            len(filename.encode('utf-8')),  # File name length
+            0    # Extra field length
+        )
+        return header + filename.encode('utf-8')
+    
+    def create_central_header(filename: str, size: int, crc: int, offset: int) -> bytes:
+        """Create ZIP central directory header"""
+        dt = time.localtime()
+        dosdate = (dt.tm_year - 1980) << 9 | dt.tm_mon << 5 | dt.tm_mday
+        dostime = dt.tm_hour << 11 | dt.tm_min << 5 | (dt.tm_sec // 2)
+        
+        header = struct.pack(
+            '<4sHHHHHHIIIHHHHHII',  # Central directory header format
+            b'PK\x01\x02',  # Central file header signature
+            0x314,  # Version made by (3.1 Unix)
+            0x14,   # Version needed to extract (2.0)
+            0,      # General purpose bit flag
+            0,      # Compression method
+            dostime,  # Last mod file time
+            dosdate,  # Last mod file date
+            crc,      # CRC-32
+            size,     # Compressed size
+            size,     # Uncompressed size
+            len(filename.encode('utf-8')),  # File name length
+            0,   # Extra field length
+            0,   # File comment length
+            0,   # Disk number start
+            0,   # Internal file attributes
+            0x81A4 << 16,  # External file attributes (regular file, rw-r--r--)
+            offset  # Relative offset of local header
+        )
+        return header + filename.encode('utf-8')
+    
+    # Track metadata for central directory
+    file_records = []
+    current_offset = 0
     completed = 0
     failed = 0
     
-    logger.info(f"[Job {job_id[:8]}] Starting to create ZIP with {total_tracks} tracks")
-    
     async with aiohttp.ClientSession() as session:
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for idx, track in enumerate(tracks):
-                # Check if cancelled
-                if cancel_flags.get(job_id, False):
-                    logger.info(f"[Job {job_id[:8]}] Download cancelled")
-                    break
+        # Stream each file as it downloads
+        for idx, track in enumerate(tracks):
+            if cancel_flags.get(job_id, False):
+                logger.info(f"[Job {job_id[:8]}] Cancelled")
+                break
                 
-                try:
-                    filename = track.get('filename', track['url'].split('/')[-1])
-                    if not any(filename.endswith(ext) for ext in ['.mp3', '.m4a', '.aac', '.ogg', '.opus', '.webm', '.wav', '.flac']):
-                        filename += '.mp3'
-                    
-                    logger.info(f"[Job {job_id[:8]}] Downloading track {idx+1}/{total_tracks}: {filename}")
-                    
-                    # Download file
-                    async with session.get(track['url']) as response:
-                        response.raise_for_status()
-                        content = await response.read()
-                        
-                        # Add to ZIP
-                        zip_file.writestr(filename, content)
-                        completed += 1
-                        
-                        logger.info(f"[Job {job_id[:8]}] Successfully added {filename} to ZIP ({completed}/{total_tracks})")
-                        
-                        # Update job progress
-                        if job_id in download_jobs:
-                            download_jobs[job_id]['progress'] = {
-                                'total': total_tracks,
-                                'completed': completed,
-                                'failed': failed
-                            }
-                            await broadcast_job_update(job_id, download_jobs[job_id])
+            try:
+                filename = track.get('filename', track['url'].split('/')[-1])
+                if not any(filename.endswith(ext) for ext in ['.mp3', '.m4a', '.aac', '.ogg', '.opus', '.webm', '.wav', '.flac']):
+                    filename += '.mp3'
                 
-                except Exception as e:
-                    logger.error(f"[Job {job_id[:8]}] Failed to download {track.get('filename', 'unknown')}: {str(e)}")
-                    failed += 1
+                logger.info(f"[Job {job_id[:8]}] Streaming track {idx+1}/{len(tracks)}: {filename}")
+                
+                # Download file
+                async with session.get(track['url']) as response:
+                    response.raise_for_status()
                     
-                    # Update progress even on failure
+                    # Collect chunks to calculate CRC
+                    chunks = []
+                    async for chunk in response.content.iter_chunked(1024 * 1024):  # 1MB chunks
+                        chunks.append(chunk)
+                    
+                    file_data = b''.join(chunks)
+                    crc = zlib.crc32(file_data) & 0xffffffff
+                    size = len(file_data)
+                    
+                    # Write local header
+                    header = create_local_header(filename, size, crc)
+                    yield header
+                    
+                    # Stream file data
+                    yield file_data
+                    
+                    # Save record for central directory
+                    file_records.append({
+                        'filename': filename,
+                        'size': size,
+                        'crc': crc,
+                        'offset': current_offset
+                    })
+                    
+                    current_offset += len(header) + size
+                    completed += 1
+                    
+                    # Update progress
                     if job_id in download_jobs:
                         download_jobs[job_id]['progress'] = {
-                            'total': total_tracks,
+                            'total': len(tracks),
                             'completed': completed,
                             'failed': failed
                         }
                         await broadcast_job_update(job_id, download_jobs[job_id])
-    
-    logger.info(f"[Job {job_id[:8]}] ZIP creation complete: {completed} successful, {failed} failed")
-    zip_buffer.seek(0)
-    return zip_buffer
+                        
+            except Exception as e:
+                logger.error(f"[Job {job_id[:8]}] Failed: {str(e)}")
+                failed += 1
+                if job_id in download_jobs:
+                    download_jobs[job_id]['progress'] = {
+                        'total': len(tracks),
+                        'completed': completed,
+                        'failed': failed
+                    }
+                    await broadcast_job_update(job_id, download_jobs[job_id])
+        
+        # Write central directory
+        central_offset = current_offset
+        for record in file_records:
+            header = create_central_header(
+                record['filename'],
+                record['size'],
+                record['crc'],
+                record['offset']
+            )
+            yield header
+            current_offset += len(header)
+        
+        # Write end of central directory
+        end_record = struct.pack(
+            '<4s4H2IH',
+            b'PK\x05\x06',  # End of central dir signature
+            0,   # This disk number
+            0,   # Central dir start disk
+            len(file_records),  # Entries on this disk
+            len(file_records),  # Total entries
+            current_offset - central_offset,  # Central dir size
+            central_offset,  # Central dir offset
+            0    # Comment length
+        )
+        yield end_record
+        
+    logger.info(f"[Job {job_id[:8]}] Streaming complete: {completed}/{len(tracks)} successful")
 
 def detect_plugin(url):
     """Detect which audio streaming plugin a website is using."""
@@ -512,38 +608,45 @@ async def stream_download(job_id: str):
     if not tracks:
         raise HTTPException(status_code=404, detail="No tracks found")
     
-    logger.info(f"[Job {job_id[:8]}] Starting ZIP creation for {len(tracks)} tracks")
+    logger.info(f"[Job {job_id[:8]}] Starting streaming download for {len(tracks)} tracks")
     
     # Update job status
     job['status'] = 'downloading'
-    job['message'] = f"Creating ZIP file with {len(tracks)} tracks..."
-    await broadcast_job_update(job_id, job)
+    job['message'] = f"Streaming {len(tracks)} tracks directly to browser..."
     
-    # Create ZIP file
-    try:
-        zip_buffer = await create_streaming_zip(tracks, job.get('download_name', 'download'), job_id)
-        
-        # Update job status
-        job['status'] = 'completed'
-        job['message'] = f"Download complete!"
-        job['completed_at'] = datetime.now()
-        await broadcast_job_update(job_id, job)
-        
-        # Return the ZIP file
-        return StreamingResponse(
-            zip_buffer,
-            media_type="application/zip",
-            headers={
-                "Content-Disposition": f"attachment; filename={job.get('download_name', 'download')}.zip",
-                "Content-Length": str(zip_buffer.getbuffer().nbytes)
-            }
-        )
-    except Exception as e:
-        job['status'] = 'error'
-        job['message'] = f"Download failed: {str(e)}"
-        job['completed_at'] = datetime.now()
-        await broadcast_job_update(job_id, job)
-        raise HTTPException(status_code=500, detail=str(e))
+    async def stream_with_status():
+        """Stream ZIP and update status"""
+        try:
+            await broadcast_job_update(job_id, job)
+            
+            # Stream the ZIP file directly as files download
+            async for chunk in stream_zip_truly(tracks, job_id):
+                yield chunk
+            
+            # Update completion status
+            job['status'] = 'completed'
+            job['message'] = "Download complete!"
+            job['completed_at'] = datetime.now()
+            await broadcast_job_update(job_id, job)
+            
+        except Exception as e:
+            job['status'] = 'error'
+            job['message'] = f"Download failed: {str(e)}"
+            job['completed_at'] = datetime.now()
+            await broadcast_job_update(job_id, job)
+            logger.error(f"[Job {job_id[:8]}] Streaming error: {str(e)}")
+            raise
+    
+    # Return true streaming response
+    return StreamingResponse(
+        stream_with_status(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename={job.get('download_name', 'download')}.zip",
+            "Transfer-Encoding": "chunked",
+            "Cache-Control": "no-cache"
+        }
+    )
 
 @app.get("/api/status/{job_id}", response_model=DownloadStatus)
 async def get_status(job_id: str):
