@@ -1,107 +1,128 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Audio Downloader v2.0</title>
-    <link rel="stylesheet" href="/static/styles.css">
-</head>
-<body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Google Font: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <title>AudioFetch</title>
+    <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
     <div class="container">
-        <header>
-            <h1>🎵 Audio Downloader</h1>
-            <div class="header-info">
-                <span id="connection-status" class="connection-status">🔴 Disconnected</span>
-                <button id="logout-btn" onclick="logout()" style="display: none;">Logout</button>
-            </div>
-        </header>
+      <header>
+        <div class="logo-container">
+          <img src="/static/logo.svg" alt="AudioFetch Logo" class="logo" />
+          <h1>AudioFetch</h1>
+        </div>
+        <div class="header-info">
+          <button id="logout-btn" onclick="logout()" style="display: none">
+            Logout
+          </button>
+        </div>
+      </header>
 
-        <div id="notifications" class="notifications"></div>
+      <div id="notifications" class="notifications"></div>
 
-        <!-- Authentication Section -->
-        <section id="auth-section" class="auth-section" style="display: none;">
-            <h2>🔐 Admin Login</h2>
-            <p>Login to enable server-side downloads</p>
-            <div class="auth-form">
-                <input type="password" id="admin-password" placeholder="Enter admin password" />
-                <button onclick="login()" class="btn-primary">Login</button>
-            </div>
-        </section>
+      <!-- Main Download Form -->
+      <section class="download-form">
+        <h2>Start New Download</h2>
 
-        <!-- Main Download Form -->
-        <section class="download-form">
-            <h2>Start New Download</h2>
-            
-            <div class="form-group">
-                <label for="url">URL</label>
-                <input type="url" id="url" placeholder="https://example.com/audiobook" required />
-            </div>
+        <div class="form-group">
+          <label for="url">URL</label>
+          <input
+            type="url"
+            id="url"
+            placeholder="https://example.com/audiobook"
+            required
+          />
+        </div>
 
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="name">Name (optional)</label>
-                    <input type="text" id="name" placeholder="my-audiobook" />
-                </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="name">Name (optional)</label>
+            <input type="text" id="name" placeholder="my-audiobook" />
+          </div>
 
-                <div class="form-group">
-                    <label for="plugin">Plugin (auto-detect if empty)</label>
-                    <select id="plugin">
-                        <option value="">Auto-detect</option>
-                        <option value="plyr">Plyr</option>
-                        <option value="simple_mp3">Simple MP3</option>
-                    </select>
-                </div>
-            </div>
+          <div class="form-group">
+            <label for="plugin">Plugin (auto-detect if empty)</label>
+            <select id="plugin">
+              <option value="">Auto-detect</option>
+              <option value="plyr">Plyr</option>
+              <option value="simple_mp3">Simple MP3</option>
+            </select>
+          </div>
+        </div>
 
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="workers">Parallel Workers</label>
-                    <input type="number" id="workers" value="5" min="1" max="20" />
-                </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="workers">Parallel Workers</label>
+            <input type="number" id="workers" value="5" min="1" max="20" />
+          </div>
 
-                <div class="form-group">
-                    <label for="download-mode">Download Mode</label>
-                    <select id="download-mode">
-                        <option value="browser">Browser (no server storage)</option>
-                        <option value="server" id="server-mode-option" style="display: none;">Server (requires login)</option>
-                    </select>
-                </div>
-            </div>
+          <div class="form-group">
+            <label for="download-mode">Download Mode</label>
+            <select id="download-mode">
+              <option value="browser">Browser (no server storage)</option>
+              <option
+                value="server"
+                id="server-mode-option"
+                style="display: none"
+              >
+                Server (requires login)
+              </option>
+            </select>
+          </div>
+        </div>
 
-            <button onclick="startDownload()" class="btn-primary btn-large">Start Download</button>
-        </section>
+        <button onclick="startDownload()" class="btn-primary btn-large">
+          Start Download
+        </button>
+      </section>
 
-        <!-- Active Jobs -->
-        <section class="jobs-section">
-            <h2>Active Downloads</h2>
-            <div id="jobs-list" class="jobs-list">
-                <!-- Jobs will be added here dynamically -->
-            </div>
-        </section>
+      <!-- Active Jobs -->
+      <section class="jobs-section">
+        <h2>Active Downloads</h2>
+        <div id="jobs-list" class="jobs-list">
+          <!-- Jobs will be added here dynamically -->
+        </div>
+      </section>
 
-        <!-- Server Downloads (authenticated only) -->
-        <section id="server-downloads-section" class="server-downloads-section" style="display: none;">
-            <h2>📁 Server Downloads</h2>
-            <button onclick="loadServerDownloads()" class="btn-secondary">Refresh</button>
-            <div id="server-downloads-list" class="downloads-list">
-                <!-- Downloads will be listed here -->
-            </div>
-        </section>
-
-        <!-- Features Info -->
-        <section class="info-section">
-            <h3>Features</h3>
-            <ul>
-                <li><strong>Browser Mode:</strong> Downloads stream directly to your browser without storing on server</li>
-                <li><strong>Server Mode:</strong> Requires admin login, saves files to server for later access</li>
-                <li><strong>Real-time Progress:</strong> Live updates via WebSocket connection</li>
-                <li><strong>Auto-detection:</strong> Automatically detects audio players on websites</li>
-                <li><strong>Parallel Downloads:</strong> Configure workers for faster downloads</li>
-                <li><strong>Multiple Formats:</strong> Supports MP3, M4A, AAC, OGG, OPUS, WebM, WAV, FLAC</li>
-            </ul>
-        </section>
+      <!-- Server Downloads (authenticated only) -->
+      <section
+        id="server-downloads-section"
+        class="server-downloads-section"
+        style="display: none"
+      >
+        <h2>📁 Server Downloads</h2>
+        <button onclick="loadServerDownloads()" class="btn-secondary">
+          Refresh
+        </button>
+        <div id="server-downloads-list" class="downloads-list">
+          <!-- Downloads will be listed here -->
+        </div>
+      </section>
+      <!-- Authentication Section -->
+      <section id="auth-section" class="auth-section" style="display: none">
+        <h2>🔐 Admin Login</h2>
+        <p>Login to enable server-side downloads</p>
+        <div class="auth-form">
+          <input
+            type="password"
+            id="admin-password"
+            placeholder="Enter admin password"
+          />
+          <button onclick="login()" class="btn-primary">Login</button>
+        </div>
+      </section>
     </div>
 
     <script src="/static/script.js"></script>
-</body>
+  </body>
 </html>

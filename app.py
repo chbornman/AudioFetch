@@ -33,7 +33,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('audio_downloader.log')
+        logging.FileHandler('audiofetch.log')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from player_info import get_player_info
 from downloader import download_tracks
 
-app = FastAPI(title="Audio Downloader", version="2.0.0")
+app = FastAPI(title="AudioFetch", version="2.0.0")
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -786,7 +786,7 @@ async def download_as_zip(name: str, auth_token: Optional[str] = None):
 async def startup_event():
     """Log startup message."""
     logger.info("=" * 60)
-    logger.info("Audio Downloader API v2.0 started successfully!")
+    logger.info("AudioFetch API v2.0 started successfully!")
     logger.info("Access the web interface at http://localhost:8000")
     logger.info(f"Admin password is: {ADMIN_PASSWORD}")
     logger.info("=" * 60)

@@ -1,16 +1,27 @@
 /* Audio Downloader v2.0 Styles */
 
 :root {
-    --primary-color: #2563eb;
+    /* Accent Colors */
+    --primary-color: #3b82f6; /* blue-500 */
+    --primary-hover: #2563eb; /* blue-600 */
     --success-color: #10b981;
     --error-color: #ef4444;
     --warning-color: #f59e0b;
     --info-color: #3b82f6;
-    --background: #f3f4f6;
+    --background: #f9fafb;
     --surface: #ffffff;
     --text-primary: #111827;
     --text-secondary: #6b7280;
     --border: #e5e7eb;
+    
+    /* Typography */
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    
+    /* Radius & Shadows */
+    --radius: 8px;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+    --shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.15);
 }
 
 * {
@@ -20,32 +31,35 @@
 }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: var(--font-sans);
     background-color: var(--background);
     color: var(--text-primary);
     line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
 }
 
 .container {
-    max-width: 1200px;
+    max-width: 960px;
     margin: 0 auto;
-    padding: 20px;
+    padding: 24px 16px;
 }
 
 /* Header */
 header {
     background: var(--surface);
     padding: 20px;
-    border-radius: 8px;
-    margin-bottom: 20px;
+    border-radius: var(--radius);
+    margin-bottom: 24px;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    box-shadow: var(--shadow);
 }
 
 header h1 {
-    font-size: 24px;
+    font-size: 1.5rem;
+    font-weight: 600;
     color: var(--primary-color);
 }
 
@@ -54,11 +68,18 @@ header h1 {
     align-items: center;
     gap: 15px;
 }
-
-.connection-status {
-    font-size: 14px;
-    font-weight: 500;
+/* Logo container and logo sizing */
+.logo-container {
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
+
+.logo {
+    width: 32px;
+    height: 32px;
+}
+
 
 /* Notifications */
 .notifications {
@@ -104,9 +125,9 @@ header h1 {
 section {
     background: var(--surface);
     padding: 24px;
-    border-radius: 8px;
-    margin-bottom: 20px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    border-radius: var(--radius);
+    margin-bottom: 24px;
+    box-shadow: var(--shadow-sm);
 }
 
 section h2 {
@@ -135,9 +156,9 @@ section h3 {
 .form-group input,
 .form-group select {
     width: 100%;
-    padding: 8px 12px;
+    padding: 10px 14px;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius);
     font-size: 16px;
     transition: border-color 0.2s;
 }
@@ -164,7 +185,7 @@ section h3 {
 button {
     padding: 8px 16px;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius);
     font-size: 14px;
     font-weight: 500;
     cursor: pointer;
@@ -177,7 +198,7 @@ button {
 }
 
 .btn-primary:hover {
-    background: #1d4ed8;
+    background: var(--primary-hover);
 }
 
 .btn-secondary {
@@ -336,7 +357,7 @@ button {
 .progress-container {
     margin: 8px 0;
     background: var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius);
     overflow: hidden;
     position: relative;
     height: 24px;
@@ -436,4 +457,19 @@ button {
     0% { opacity: 1; }
     50% { opacity: 0.6; }
     100% { opacity: 1; }
+}
+
+/* Mobile adjustments */
+@media (max-width: 600px) {
+  .auth-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .auth-form input,
+  .auth-form button {
+    width: 100%;
+  }
+  .form-row {
+    grid-template-columns: 1fr;
+  }
 }

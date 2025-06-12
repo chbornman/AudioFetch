@@ -1,10 +1,11 @@
-# Audio Downloader v2.0
+# AudioFetch
 
 A FastAPI-based web application for downloading audio from websites with real-time progress tracking via WebSockets.
 
 ## Features
 
 ### Core Features
+
 - **Browser Mode**: Stream downloads directly to browser without server storage
 - **Server Mode**: Password-protected downloads saved to server (for admin use)
 - **Real-time Progress**: WebSocket-based live updates
@@ -13,6 +14,7 @@ A FastAPI-based web application for downloading audio from websites with real-ti
 - **Multiple Formats**: Supports MP3, M4A, AAC, OGG, OPUS, WebM, WAV, FLAC
 
 ### Supported Audio Players
+
 - ✅ Plyr.js audio players
 - ✅ Direct MP3 links
 - ❌ Howler.js (planned)
@@ -22,6 +24,7 @@ A FastAPI-based web application for downloading audio from websites with real-ti
 ## Installation
 
 1. Clone the repository:
+
 ```bash
 git clone <repository-url>
 cd download_audio
@@ -29,11 +32,13 @@ git checkout containerized
 ```
 
 2. Install dependencies:
+
 ```bash
 pip install -r requirements.txt
 ```
 
 3. Set environment variables (optional):
+
 ```bash
 export ADMIN_PASSWORD="your-secure-password"  # Default: admin123
 export SECRET_KEY="your-secret-key"           # For JWT tokens
@@ -42,6 +47,7 @@ export SECRET_KEY="your-secret-key"           # For JWT tokens
 ## Running the Application
 
 ### Local Development
+
 ```bash
 python app.py
 ```
@@ -49,6 +55,7 @@ python app.py
 The app will be available at `http://localhost:8000`
 
 ### Using Docker
+
 ```bash
 docker-compose up --build
 ```
@@ -56,6 +63,7 @@ docker-compose up --build
 ## Usage Guide
 
 ### Browser Mode (No Authentication Required)
+
 1. Open `http://localhost:8000` in your browser
 2. Enter the URL of the page containing audio
 3. Leave "Download Mode" as "Browser"
@@ -63,12 +71,14 @@ docker-compose up --build
 5. Files will stream directly to your browser as a ZIP
 
 ### Server Mode (Authentication Required)
+
 1. Click on "Admin Login" and enter the admin password
 2. Select "Server" as the download mode
 3. Start the download - files will be saved on the server
 4. Access saved downloads from the "Server Downloads" section
 
 ### CLI Usage (Original Functionality)
+
 The original command-line interface is still available:
 
 ```bash
@@ -76,6 +86,7 @@ python main.py <url> [name] [--plugin <plugin_name>] [--workers <num>]
 ```
 
 Example:
+
 ```bash
 python main.py https://example.com/audiobook my-audiobook --plugin plyr --workers 10
 ```
@@ -83,6 +94,7 @@ python main.py https://example.com/audiobook my-audiobook --plugin plyr --worker
 ## API Endpoints
 
 ### Public Endpoints
+
 - `GET /` - Web interface
 - `POST /api/download` - Start a new download
 - `GET /api/status/{job_id}` - Get job status
@@ -93,6 +105,7 @@ python main.py https://example.com/audiobook my-audiobook --plugin plyr --worker
 - `WebSocket /ws` - Real-time updates
 
 ### Protected Endpoints (Require Authentication)
+
 - `POST /api/auth/login` - Login with admin password
 - `GET /api/downloads` - List server downloads
 - `DELETE /api/downloads/{name}` - Delete server download
@@ -101,6 +114,7 @@ python main.py https://example.com/audiobook my-audiobook --plugin plyr --worker
 ## Architecture
 
 ### Backend (FastAPI)
+
 - WebSocket support for real-time updates
 - JWT-based authentication for server mode
 - Async/await for efficient I/O operations
@@ -108,6 +122,7 @@ python main.py https://example.com/audiobook my-audiobook --plugin plyr --worker
 - Streaming responses for large files
 
 ### Frontend
+
 - Vanilla JavaScript with WebSocket client
 - Real-time progress bars
 - Responsive design
@@ -116,6 +131,7 @@ python main.py https://example.com/audiobook my-audiobook --plugin plyr --worker
 ### Download Flow
 
 #### Browser Mode
+
 1. User submits URL
 2. Backend scrapes audio links
 3. Creates streaming response
@@ -123,6 +139,7 @@ python main.py https://example.com/audiobook my-audiobook --plugin plyr --worker
 5. No server storage required
 
 #### Server Mode
+
 1. User authenticates with admin password
 2. Backend downloads files to server
 3. Files stored in `downloads/` directory
@@ -131,11 +148,13 @@ python main.py https://example.com/audiobook my-audiobook --plugin plyr --worker
 ## Configuration
 
 ### Environment Variables
+
 - `ADMIN_PASSWORD`: Password for server mode (default: "admin123")
 - `SECRET_KEY`: JWT secret key (default: auto-generated)
 - `ACCESS_TOKEN_EXPIRE_MINUTES`: Token expiry (default: 1440)
 
 ### Download Settings
+
 - Workers: 1-20 parallel downloads (default: 5)
 - Timeout: 30 seconds per request
 - Chunk size: 8KB for streaming
@@ -143,11 +162,13 @@ python main.py https://example.com/audiobook my-audiobook --plugin plyr --worker
 ## Testing
 
 Run the test script:
+
 ```bash
 python test_improved.py
 ```
 
 This will test:
+
 - Authentication
 - Browser mode downloads
 - Server mode downloads
@@ -156,10 +177,12 @@ This will test:
 ## Logging
 
 Logs are written to:
+
 - Console output (INFO level)
-- `audio_downloader.log` file (DEBUG level)
+- `audiofetch.log` file (DEBUG level)
 
 Log format includes:
+
 - Timestamp
 - Log level
 - Job ID (when applicable)
@@ -185,11 +208,12 @@ For VPS deployment:
 5. Use process manager (systemd/supervisor)
 
 Example Nginx config:
+
 ```nginx
 server {
     listen 80;
     server_name your-domain.com;
-    
+
     location / {
         proxy_pass http://localhost:8000;
         proxy_http_version 1.1;
@@ -203,17 +227,20 @@ server {
 ## Troubleshooting
 
 ### WebSocket Connection Issues
+
 - Check firewall allows WebSocket connections
 - Ensure reverse proxy forwards WebSocket headers
 - Check browser console for errors
 
 ### Download Failures
-- Check `audio_downloader.log` for details
+
+- Check `audiofetch.log` for details
 - Verify URL is accessible
 - Check audio player is supported
 - Ensure sufficient disk space (server mode)
 
 ### Authentication Issues
+
 - Verify ADMIN_PASSWORD environment variable
 - Check token hasn't expired
 - Clear browser localStorage if needed
