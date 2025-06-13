@@ -112,8 +112,8 @@ def verify_token(token: str):
     except PyJWTError:
         return False
 
-async def broadcast_job_update(job_id: str, job_data: dict):
-    """Broadcast job updates to all connected websockets."""
+async def send_job_update(websocket: WebSocket, job_id: str, job_data: dict):
+    """Send job update to a specific websocket."""
     # Create a serializable copy of the job data
     serializable_data = job_data.copy()
     
@@ -133,10 +133,17 @@ async def broadcast_job_update(job_id: str, job_data: dict):
         "data": serializable_data
     }
     
+    try:
+        await websocket.send_json(message)
+    except Exception as e:
+        logger.warning(f"Failed to send to websocket: {e}")
+
+async def broadcast_job_update(job_id: str, job_data: dict):
+    """Broadcast job updates to all connected websockets."""
     disconnected = []
     for conn_id, websocket in active_connections.items():
         try:
-            await websocket.send_json(message)
+            await send_job_update(websocket, job_id, job_data)
         except Exception as e:
             logger.warning(f"Failed to send to websocket {conn_id}: {e}")
             disconnected.append(conn_id)
@@ -404,8 +411,15 @@ async def process_download(job_id: str, request: DownloadRequest):
         # Detect plugin if not specified
         if not request.plugin:
             job['status'] = 'detecting'
-            job['message'] = "Detecting audio player..."
-            logger.info(f"[Job {job_id[:8]}] Detecting audio player...")
+            job['message'] = "Fetching page content..."
+            logger.info(f"[Job {job_id[:8]}] Fetching page content...")
+            await broadcast_job_update(job_id, job)
+            
+            # Add a small delay to show the status
+            await asyncio.sleep(0.5)
+            
+            job['message'] = "Analyzing page for audio players..."
+            logger.info(f"[Job {job_id[:8]}] Analyzing page for audio players...")
             await broadcast_job_update(job_id, job)
             
             detections = detect_plugin(request.url)
@@ -425,9 +439,15 @@ async def process_download(job_id: str, request: DownloadRequest):
             await broadcast_job_update(job_id, job)
         
         # Import and run the scraper
-        job['status'] = 'downloading'
-        job['message'] = f"Scraping with {request.plugin} plugin..."
-        logger.info(f"[Job {job_id[:8]}] Scraping with {request.plugin} plugin...")
+        job['status'] = 'detecting'
+        job['message'] = f"Loading {get_player_info(request.plugin)['name']} scraper..."
+        logger.info(f"[Job {job_id[:8]}] Loading {get_player_info(request.plugin)['name']} scraper...")
+        await broadcast_job_update(job_id, job)
+        
+        await asyncio.sleep(0.3)
+        
+        job['message'] = f"Extracting audio tracks from page..."
+        logger.info(f"[Job {job_id[:8]}] Extracting audio tracks from page...")
         await broadcast_job_update(job_id, job)
         
         if request.plugin == 'simple' or request.plugin == 'simple_mp3':
@@ -463,15 +483,36 @@ async def process_download(job_id: str, request: DownloadRequest):
             job['status'] = 'streaming'
             job['message'] = f"Ready to stream {len(tracks)} tracks"
             job['stream_ready'] = True
-            await broadcast_job_update(job_id, job)
+            
+            # Only send auto_download flag to ONE connection
+            if active_connections:
+                # Pick a single connection to trigger the download
+                first_conn_id = next(iter(active_connections))
+                
+                # Send to all OTHER connections without auto_download
+                for conn_id, websocket in active_connections.items():
+                    if conn_id == first_conn_id:
+                        # This connection gets the auto_download flag
+                        job_with_auto = job.copy()
+                        job_with_auto['auto_download'] = True
+                        await send_job_update(websocket, job_id, job_with_auto)
+                        logger.info(f"[Job {job_id[:8]}] Sent auto-download trigger to connection {conn_id[:8]}")
+                    else:
+                        # Other connections get update without auto_download
+                        await send_job_update(websocket, job_id, job)
+                        logger.info(f"[Job {job_id[:8]}] Sent update without auto-download to connection {conn_id[:8]}")
+            else:
+                # No connections, just broadcast normally
+                await broadcast_job_update(job_id, job)
+            
             logger.info(f"[Job {job_id[:8]}] Browser mode: Ready for streaming")
         else:
             # Server mode - check authentication
             if not request.auth_token or not verify_token(request.auth_token):
                 raise Exception("Authentication required for server downloads")
             
-            # Download tracks with progress callback
-            def update_progress(completed, failed):
+            # Download tracks with async progress callback
+            async def update_progress(completed, failed):
                 # Check if cancelled
                 if cancel_flags.get(job_id, False):
                     logger.info(f"[Job {job_id[:8]}] Download cancelled")
@@ -481,11 +522,14 @@ async def process_download(job_id: str, request: DownloadRequest):
                 job['progress']['failed'] = failed
                 logger.info(f"[Job {job_id[:8]}] Progress: {completed}/{len(tracks)} completed, {failed} failed")
                 
-                # Use asyncio to run the coroutine
-                asyncio.create_task(broadcast_job_update(job_id, job))
+                # Broadcast update
+                await broadcast_job_update(job_id, job)
                 return True  # Continue downloading
             
-            result = download_tracks(
+            # Import the async download function
+            from downloader import download_tracks_async
+            
+            result = await download_tracks_async(
                 tracks, 
                 request.name,
                 prefix=request.name if request.plugin in ['simple', 'simple_mp3'] else None,

@@ -25,6 +25,14 @@ function initWebSocket() {
         const message = JSON.parse(event.data);
         if (message.type === 'job_update') {
             updateJobInList(message.job_id, message.data);
+            
+            // If a server download completes, refresh the server downloads list
+            if (message.data.download_mode === 'server' && 
+                (message.data.status === 'completed' || message.data.status === 'error')) {
+                if (isAuthenticated) {
+                    loadServerDownloads();
+                }
+            }
         }
     };
     
@@ -175,17 +183,29 @@ function addJobToList(job) {
 function updateJobInList(jobId, jobData) {
     const jobElement = document.getElementById(`job-${jobId}`);
     if (jobElement) {
-        const updatedElement = createJobElement(jobData);
+        // Ensure job_id is included in the data for createJobElement
+        const jobDataWithId = { ...jobData, job_id: jobId };
+        const updatedElement = createJobElement(jobDataWithId);
         jobElement.replaceWith(updatedElement);
+    } else {
+        // If job doesn't exist in list, add it
+        const jobDataWithId = { ...jobData, job_id: jobId };
+        addJobToList(jobDataWithId);
     }
     
     // Auto-start download when job is ready for streaming
-    if (jobData.status === 'streaming' && jobData.download_mode === 'browser' && !autoDownloadedJobs.has(jobId)) {
-        console.log(`Job ${jobId} status changed to streaming, auto-downloading...`);
-        autoDownloadedJobs.add(jobId);
-        setTimeout(() => {
-            streamDownload(jobId);
-        }, 500); // Small delay to ensure UI updates
+    if (jobData.status === 'streaming' && jobData.download_mode === 'browser') {
+        // Only trigger download if explicitly marked by server AND not already downloaded
+        if (jobData.auto_download === true && !autoDownloadedJobs.has(jobId)) {
+            autoDownloadedJobs.add(jobId);
+            localStorage.setItem('autoDownloadedJobs', JSON.stringify([...autoDownloadedJobs]));
+            console.log(`Job ${jobId} marked for auto-download by server`);
+            
+            // Add a small delay to ensure UI updates
+            setTimeout(() => {
+                streamDownload(jobId);
+            }, 500);
+        }
     }
 }
 
@@ -209,9 +229,13 @@ function createJobElement(job) {
     if (job.status === 'pending' || job.status === 'detecting') {
         actionsHtml = `<button onclick="cancelJob('${job.job_id}')" class="btn-cancel">Cancel</button>`;
     } else if (job.status === 'downloading') {
-        actionsHtml = `<span class="downloading-status">📥 Downloading to your browser...</span>`;
+        if (job.download_mode === 'browser') {
+            actionsHtml = `<span class="downloading-status">📥 Streaming to your browser...</span>`;
+        } else {
+            actionsHtml = `<span class="downloading-status">💾 Saving to server...</span>`;
+        }
     } else if (job.status === 'streaming' && job.download_mode === 'browser') {
-        actionsHtml = `<span class="streaming-status">✅ Download started! Check your Downloads folder</span>`;
+        actionsHtml = `<span class="streaming-status">✅ Ready! Download will start automatically...</span>`;
     } else if (job.status === 'completed' || job.status === 'error' || job.status === 'cancelled') {
         actionsHtml = `<button onclick="clearJob('${job.job_id}')" class="btn-clear">Clear</button>`;
     }
@@ -231,10 +255,29 @@ function createJobElement(job) {
     return div;
 }
 
-// Track which jobs have auto-downloaded
-const autoDownloadedJobs = new Set();
+// Track which jobs have auto-downloaded (persisted in localStorage)
+const autoDownloadedJobs = new Set(JSON.parse(localStorage.getItem('autoDownloadedJobs') || '[]'));
+// Track which downloads are in progress
+const downloadsInProgress = new Set();
+
+// Listen for storage changes from other tabs
+window.addEventListener('storage', (e) => {
+    if (e.key === 'autoDownloadedJobs') {
+        const updated = JSON.parse(e.newValue || '[]');
+        autoDownloadedJobs.clear();
+        updated.forEach(jobId => autoDownloadedJobs.add(jobId));
+        console.log('Auto-downloaded jobs updated from another tab:', updated);
+    }
+});
 
 async function streamDownload(jobId) {
+    // Prevent multiple simultaneous downloads of the same job
+    if (downloadsInProgress.has(jobId)) {
+        console.log(`Download already in progress for job ${jobId}`);
+        return;
+    }
+    
+    downloadsInProgress.add(jobId);
     console.log(`Starting download for job ${jobId}`);
     
     // Create a hidden link and click it to start download
@@ -246,6 +289,11 @@ async function streamDownload(jobId) {
     document.body.removeChild(link);
     
     showNotification('🎉 ZIP file downloading! Check your browser\'s Downloads folder.', 'success');
+    
+    // Remove from in-progress after a delay
+    setTimeout(() => {
+        downloadsInProgress.delete(jobId);
+    }, 5000);
 }
 
 async function cancelJob(jobId) {
@@ -364,6 +412,13 @@ function formatSize(bytes) {
 
 // Initialize on load
 document.addEventListener('DOMContentLoaded', () => {
+    // Clean up old download locks from localStorage
+    Object.keys(localStorage).forEach(key => {
+        if (key.startsWith('downloading_')) {
+            localStorage.removeItem(key);
+        }
+    });
+    
     // Check for saved auth token
     const savedToken = localStorage.getItem('authToken');
     if (savedToken) {

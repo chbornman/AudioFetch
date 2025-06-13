@@ -10,6 +10,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import sys
 from collections import OrderedDict
+import asyncio
+import aiohttp
+from typing import List, Dict, Optional, Callable
 
 
 def format_progress_bar(percent, width=30):
@@ -215,7 +218,7 @@ def download_file_simple(url, filename, track_info):
         return False, 0
 
 
-def download_tracks(tracks, directory, prefix=None, max_workers=5, progress_callback=None):
+def download_tracks(tracks, directory, prefix=None, max_workers=5, progress_callback=None, job_id=None):
     """
     Download all tracks with consistent progress display.
     
@@ -224,6 +227,8 @@ def download_tracks(tracks, directory, prefix=None, max_workers=5, progress_call
         directory: Directory to save files to
         prefix: Optional prefix for filenames
         max_workers: Maximum number of parallel downloads (default 5)
+        progress_callback: Optional callback function for progress updates
+        job_id: Optional job ID for tracking and logging
     
     Returns:
         Dictionary with download statistics
@@ -237,11 +242,12 @@ def download_tracks(tracks, directory, prefix=None, max_workers=5, progress_call
     is_docker = not sys.stdout.isatty()
     
     if not is_docker:
-        print(f"\nDownloading to: downloads/{directory}/")
-        print(f"Total tracks to download: {len(tracks)}")
+        job_prefix = f"[Job {job_id[:8]}] " if job_id else ""
+        print(f"\n{job_prefix}Downloading to: downloads/{directory}/")
+        print(f"{job_prefix}Total tracks to download: {len(tracks)}")
         
         if max_workers > 1:
-            print(f"Parallel downloads: {max_workers}")
+            print(f"{job_prefix}Parallel downloads: {max_workers}")
         print("-" * 80)
     
     successful = 0
@@ -274,7 +280,8 @@ def download_tracks(tracks, directory, prefix=None, max_workers=5, progress_call
     # Execute downloads
     if is_docker:
         # Docker mode - simple progress without ANSI escape sequences
-        print(f"Starting download of {len(tracks)} tracks...")
+        job_prefix = f"[Job {job_id[:8]}] " if job_id else ""
+        print(f"{job_prefix}Starting download of {len(tracks)} tracks...")
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_task = {
                 executor.submit(download_file_docker, url, filepath, track_info): (url, filepath, track_info)
@@ -343,7 +350,150 @@ def download_tracks(tracks, directory, prefix=None, max_workers=5, progress_call
     
     if not is_docker:
         print("-" * 80)
-        print(f"\nDownload Summary:")
+        job_prefix = f"[Job {job_id[:8]}] " if job_id else ""
+        print(f"\n{job_prefix}Download Summary:")
+        print(f"  ✓ Successful: {successful}")
+        print(f"  ✗ Failed: {failed}")
+        print(f"  Total: {len(tracks)}")
+    
+    return {
+        'successful': successful,
+        'failed': failed,
+        'total': len(tracks)
+    }
+
+
+async def download_file_async(session: aiohttp.ClientSession, url: str, filepath: str, track_info: dict, job_id: str = None) -> tuple:
+    """Download a single file asynchronously."""
+    try:
+        job_prefix = f"[Job {job_id[:8]}] " if job_id else ""
+        track_num = track_info['num']
+        total_tracks = track_info['total']
+        name = os.path.basename(filepath)[:40]
+        
+        print(f"{job_prefix}[{track_num}/{total_tracks}] Downloading {name}...")
+        
+        async with session.get(url) as response:
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(filepath, 'wb') as fd:
+                async for chunk in response.content.iter_chunked(16384):
+                    fd.write(chunk)
+                    downloaded += len(chunk)
+            
+            size_mb = total_size / (1024 * 1024)
+            print(f"{job_prefix}[{track_num}/{total_tracks}] ✓ {name} ({size_mb:.1f} MB)")
+            return True, total_size
+            
+    except Exception as e:
+        print(f"{job_prefix}[{track_num}/{total_tracks}] ✗ {name} - Error: {str(e)}")
+        return False, 0
+
+
+async def download_tracks_async(
+    tracks: List[Dict], 
+    directory: str, 
+    prefix: Optional[str] = None, 
+    max_workers: int = 5, 
+    progress_callback: Optional[Callable] = None,
+    job_id: Optional[str] = None
+) -> Dict:
+    """
+    Download all tracks asynchronously with progress updates.
+    
+    Args:
+        tracks: List of track dictionaries with 'url' and 'name' keys
+        directory: Directory to save files to
+        prefix: Optional prefix for filenames
+        max_workers: Maximum number of parallel downloads
+        progress_callback: Optional async callback function for progress updates
+        job_id: Optional job ID for tracking and logging
+    
+    Returns:
+        Dictionary with download statistics
+    """
+    # Create downloads directory structure
+    downloads_dir = os.path.join('downloads', directory)
+    if not os.path.exists(downloads_dir):
+        os.makedirs(downloads_dir)
+    
+    # Detect if running in Docker (no TTY)
+    is_docker = not sys.stdout.isatty()
+    
+    if not is_docker:
+        job_prefix = f"[Job {job_id[:8]}] " if job_id else ""
+        print(f"\n{job_prefix}Downloading to: downloads/{directory}/")
+        print(f"{job_prefix}Total tracks to download: {len(tracks)}")
+        
+        if max_workers > 1:
+            print(f"{job_prefix}Parallel downloads: {max_workers}")
+        print("-" * 80)
+    
+    successful = 0
+    failed = 0
+    
+    # Prepare download tasks
+    download_tasks = []
+    for i, track in enumerate(tracks, 1):
+        # Generate filename
+        if track.get('original_filename'):
+            filename = track['original_filename']
+        elif prefix and track.get('track_num'):
+            filename = f"{prefix}_{track['track_num']:03d}.mp3"
+        else:
+            safe_name = sanitize_filename(track['name'])
+            filename = f"{safe_name}.mp3"
+        
+        filepath = os.path.join(downloads_dir, filename)
+        
+        track_info = {
+            'num': i,
+            'total': len(tracks)
+        }
+        
+        download_tasks.append((track['url'], filepath, track_info))
+    
+    # Create aiohttp session with connection limit
+    connector = aiohttp.TCPConnector(limit=max_workers)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        # Process downloads with semaphore to limit concurrency
+        semaphore = asyncio.Semaphore(max_workers)
+        
+        async def download_with_semaphore(url, filepath, track_info):
+            async with semaphore:
+                return await download_file_async(session, url, filepath, track_info, job_id)
+        
+        # Start all downloads
+        tasks = []
+        for url, filepath, track_info in download_tasks:
+            task = asyncio.create_task(download_with_semaphore(url, filepath, track_info))
+            tasks.append(task)
+        
+        # Process completions as they happen
+        for completed_task in asyncio.as_completed(tasks):
+            success, size = await completed_task
+            if success:
+                successful += 1
+            else:
+                failed += 1
+            
+            # Call progress callback if provided
+            if progress_callback:
+                should_continue = await progress_callback(successful, failed)
+                if not should_continue:
+                    # Cancel remaining tasks
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    break
+    
+    if not is_docker:
+        print("-" * 80)
+        job_prefix = f"[Job {job_id[:8]}] " if job_id else ""
+        print(f"\n{job_prefix}Download Summary:")
         print(f"  ✓ Successful: {successful}")
         print(f"  ✗ Failed: {failed}")
         print(f"  Total: {len(tracks)}")

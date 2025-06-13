@@ -8,15 +8,17 @@ A FastAPI-based web application for downloading audio from websites with real-ti
 
 - **Browser Mode**: Stream downloads directly to browser without server storage
 - **Server Mode**: Password-protected downloads saved to server (for admin use)
-- **Real-time Progress**: WebSocket-based live updates
+- **Real-time Progress**: WebSocket-based live updates with detailed status
 - **Auto-detection**: Automatically detects audio players on websites
-- **Parallel Downloads**: Configurable workers for faster downloads
+- **Parallel Downloads**: Configurable workers for faster downloads (async)
 - **Multiple Formats**: Supports MP3, M4A, AAC, OGG, OPUS, WebM, WAV, FLAC
+- **Smart Download Control**: Prevents duplicate downloads across multiple tabs
+- **Job Tracking**: Unique job IDs for all downloads with persistent tracking
 
 ### Supported Audio Players
 
+- ✅ Direct audio tags
 - ✅ Plyr.js audio players
-- ✅ Direct MP3 links
 - ❌ Howler.js (planned)
 - ❌ MediaElement.js (planned)
 - ❌ Video.js (planned)
@@ -46,17 +48,10 @@ export SECRET_KEY="your-secret-key"           # For JWT tokens
 
 ## Running the Application
 
-### Local Development
-
-```bash
-python app.py
-```
-
-The app will be available at `http://localhost:8000`
-
 ### Using Docker
 
 1. Copy the example environment file and fill in your real values:
+
    ```bash
    cp .env.example .env
    # Edit .env to set ADMIN_PASSWORD, SECRET_KEY, PORT, etc.
@@ -64,7 +59,7 @@ The app will be available at `http://localhost:8000`
 
 2. Build and start the containers:
    ```bash
-   docker-compose up --build -d
+   docker compose up --build -d
    ```
 
 ## Usage Guide
@@ -125,14 +120,16 @@ python main.py https://example.com/audiobook my-audiobook --plugin plyr --worker
 
 - WebSocket support for real-time updates
 - JWT-based authentication for server mode
-- Async/await for efficient I/O operations
+- Fully async/await download operations using aiohttp
 - Background tasks for download processing
-- Streaming responses for large files
+- True streaming ZIP generation (no buffering)
+- Server-side download coordination for multiple tabs
 
 ### Frontend
 
 - Vanilla JavaScript with WebSocket client
-- Real-time progress bars
+- Real-time progress bars with detailed status
+- localStorage synchronization between tabs
 - Responsive design
 - No framework dependencies
 
@@ -141,17 +138,20 @@ python main.py https://example.com/audiobook my-audiobook --plugin plyr --worker
 #### Browser Mode
 
 1. User submits URL
-2. Backend scrapes audio links
-3. Creates streaming response
-4. Chunks audio files directly to browser
-5. No server storage required
+2. Backend analyzes page and detects audio player
+3. Extracts audio track information
+4. Creates streaming ZIP response
+5. Downloads and streams files directly to browser
+6. No server storage required
+7. Smart tab coordination prevents duplicate downloads
 
 #### Server Mode
 
 1. User authenticates with admin password
-2. Backend downloads files to server
-3. Files stored in `downloads/` directory
-4. User can download as ZIP later
+2. Backend downloads files asynchronously to server
+3. Real-time progress updates via WebSocket
+4. Files stored in `downloads/` directory
+5. User can download as ZIP later or manage files
 
 ## Configuration
 
@@ -166,21 +166,6 @@ python main.py https://example.com/audiobook my-audiobook --plugin plyr --worker
 - Workers: 1-20 parallel downloads (default: 5)
 - Timeout: 30 seconds per request
 - Chunk size: 8KB for streaming
-
-## Testing
-
-Run the test script:
-
-```bash
-python test_improved.py
-```
-
-This will test:
-
-- Authentication
-- Browser mode downloads
-- Server mode downloads
-- Download listing
 
 ## Logging
 
@@ -205,147 +190,6 @@ Log format includes:
 4. **Rate limiting**: Consider adding for production
 5. **HTTPS**: Use reverse proxy with SSL in production
 
-## Deployment
-
-Below is a step-by-step guide to deploy AudioFetch on a generic Ubuntu VPS.
-
-### 1. Server Preparation
-
-SSH into your server and update packages:
-
-```bash
-sudo apt update && sudo apt upgrade -y
-```
-
-Create a non-root sudo user (e.g. `deployer`):
-
-```bash
-sudo adduser deployer
-sudo usermod -aG sudo deployer
-su - deployer
-```
-
-Optional: Harden SSH access by disabling root login and password authentication:
-
-```bash
-sudo sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-sudo sed -i 's/^PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-sudo systemctl reload sshd
-```
-
-### 2. Install Docker & Compose
-
-Install Docker Engine:
-
-```bash
-curl -fsSL https://get.docker.com | sh
-```
-
-Install the Docker Compose plugin:
-
-```bash
-sudo apt update
-sudo apt install -y docker-compose-plugin
-```
-
-Add your user to the `docker` group and re-login:
-
-```bash
-sudo usermod -aG docker $USER
-su - $USER
-```
-
-### 3. Clone & Configure the App
-
-```bash
-git clone https://github.com/your-org/your-repo.git
-cd your-repo
-cp .env.example .env
-# Edit .env: set ADMIN_PASSWORD, SECRET_KEY, PORT, etc.
-mkdir -p downloads
-```
-
-### 4. Launch with Docker Compose
-
-```bash
-docker compose up --build -d
-```
-
-Verify containers are running:
-
-```bash
-docker ps
-docker compose logs -f
-```
-
-### 5. Firewall Configuration
-
-Allow SSH, HTTP, and HTTPS (and your app port if non-standard):
-
-```bash
-sudo ufw allow OpenSSH
-sudo ufw allow http
-sudo ufw allow https
-sudo ufw allow ${PORT}/tcp
-sudo ufw enable
-```
-
-### 6. (Optional) Reverse Proxy & SSL
-
-Install Nginx and Certbot:
-
-```bash
-sudo apt install -y nginx certbot python3-certbot-nginx
-sudo certbot --nginx -d your-domain.com
-```
-
-Use a simple proxy config to forward to your app:
-
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
-
-    location / {
-        proxy_pass http://localhost:${PORT};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-    }
-}
-```
-
-### 7. (Optional) Auto-Start on Boot
-
-Create a systemd service at `/etc/systemd/system/audiofetch.service`:
-
-```ini
-[Unit]
-Description=AudioFetch FastAPI Docker Compose service
-Requires=docker.service
-After=docker.service
-
-[Service]
-Type=oneshot
-WorkingDirectory=/home/deployer/your-repo
-ExecStart=/usr/bin/docker compose up -d
-ExecStop=/usr/bin/docker compose down
-RemainAfterExit=yes
-User=deployer
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start it:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable audiofetch
-sudo systemctl start audiofetch
-```
-
 ## Troubleshooting
 
 ### WebSocket Connection Issues
@@ -361,18 +205,9 @@ sudo systemctl start audiofetch
 - Check audio player is supported
 - Ensure sufficient disk space (server mode)
 
-### Authentication Issues
+## Potential Future Enhancements
 
-- Verify ADMIN_PASSWORD environment variable
-- Check token hasn't expired
-- Clear browser localStorage if needed
-
-## Future Enhancements
-
-- [ ] Support more audio players
-- [ ] Batch URL processing
-- [ ] Download history
-- [ ] User management system
-- [ ] Progress persistence across restarts
-- [ ] Mobile app
+- [ ] Support more audio players (Howler.js, Video.js)
 - [ ] Browser extension
+- [ ] Playlist support
+- [ ] Metadata extraction and tagging
