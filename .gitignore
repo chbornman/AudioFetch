@@ -40,3 +40,31 @@ htmlcov/
 
 # Docker
 *.pid
+
+# SSH Keys and Deployment
+*.key
+*.pem
+*.pub
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+github_actions_deploy*
+
+# Test files
+test_*.py
+*_test.py
+
+# Development files
+app_simple.py
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+tmp/
+temp/
+
+# Backup files
+*.bak
+*.backup

@@ -1,0 +1,80 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+test_*.py
+app_simple.py
+
+# Downloads directory (should be mounted as volume)
+downloads/
+
+# Logs
+*.log
+audiofetch.log
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Development scripts
+generate_deploy_key.sh
+restart.sh
+scripts/setup-vps-secure.sh
+main.py
+
+# Documentation (optional - remove if you want docs in container)
+*.md
+!README.md
+
+# Deployment
+deploy_key
+deploy_key.pub
+*.pem
+*.key
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
