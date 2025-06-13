@@ -46,6 +46,49 @@ body {
   padding: 24px 16px;
 }
 
+/* Info Section */
+.info-section {
+  background: var(--card-bg);
+  border-radius: 12px;
+  padding: 24px;
+  margin-bottom: 32px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+.info-section h2 {
+  color: var(--text-primary);
+  margin-bottom: 16px;
+  font-size: 24px;
+}
+
+.info-section p {
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+  line-height: 1.6;
+}
+
+.info-section ul {
+  list-style: none;
+  padding-left: 0;
+  margin: 16px 0;
+}
+
+.info-section li {
+  color: var(--text-secondary);
+  padding: 8px 0;
+  padding-left: 24px;
+  position: relative;
+  line-height: 1.5;
+}
+
+.info-section li:before {
+  content: "✓";
+  position: absolute;
+  left: 0;
+  color: var(--success-color);
+  font-weight: bold;
+}
+
 /* Header */
 header {
   background: var(--surface);
