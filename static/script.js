@@ -36,6 +36,22 @@ function initWebSocket() {
         } else if (message.type === 'job_update') {
             updateJobInList(message.job_id, message.data);
             
+            // Track job status changes
+            if (typeof posthog !== 'undefined') {
+                if (message.data.status === 'completed') {
+                    posthog.capture('download_completed', {
+                        job_id: message.job_id,
+                        download_mode: message.data.download_mode,
+                        tracks_count: message.data.progress?.total || 0
+                    });
+                } else if (message.data.status === 'error') {
+                    posthog.capture('download_failed', {
+                        job_id: message.job_id,
+                        error_message: message.data.message
+                    });
+                }
+            }
+            
             // If a server download completes, refresh the server downloads list
             if (message.data.download_mode === 'server' && 
                 (message.data.status === 'completed' || message.data.status === 'error')) {
@@ -88,8 +104,19 @@ async function login() {
             localStorage.setItem('authToken', authToken);
             showAuthenticatedUI();
             showNotification('Login successful!', 'success');
+            
+            // Track successful login
+            if (typeof posthog !== 'undefined') {
+                posthog.capture('user_logged_in');
+                posthog.identify('admin'); // Since we only have one user type
+            }
         } else {
             showNotification('Invalid password', 'error');
+            
+            // Track failed login
+            if (typeof posthog !== 'undefined') {
+                posthog.capture('login_failed');
+            }
         }
     } catch (error) {
         console.error('Login error:', error);
@@ -103,6 +130,12 @@ function logout() {
     localStorage.removeItem('authToken');
     showUnauthenticatedUI();
     showNotification('Logged out', 'info');
+    
+    // Track logout
+    if (typeof posthog !== 'undefined') {
+        posthog.capture('user_logged_out');
+        posthog.reset(); // Clear the identified user
+    }
 }
 
 function showAuthenticatedUI() {
@@ -143,6 +176,18 @@ async function startDownload() {
         return;
     }
     
+    // Track download attempt
+    if (typeof posthog !== 'undefined') {
+        posthog.capture('download_started', {
+            url_domain: new URL(url).hostname,
+            plugin: plugin || 'auto-detect',
+            workers: workers,
+            download_mode: downloadMode,
+            has_custom_name: !!name,
+            is_authenticated: isAuthenticated
+        });
+    }
+    
     const requestData = {
         url,
         name: name || null,
@@ -164,6 +209,14 @@ async function startDownload() {
             const job = await response.json();
             addJobToList(job);
             
+            // Track successful download start
+            if (typeof posthog !== 'undefined') {
+                posthog.capture('download_initiated', {
+                    job_id: job.job_id,
+                    download_mode: downloadMode
+                });
+            }
+            
             // Clear form
             document.getElementById('url').value = '';
             document.getElementById('name').value = '';
@@ -176,6 +229,15 @@ async function startDownload() {
         } else {
             const error = await response.json();
             let errorMessage = error.detail || 'Failed to start download';
+            
+            // Track download error
+            if (typeof posthog !== 'undefined') {
+                posthog.capture('download_error', {
+                    error_type: response.status === 429 ? 'rate_limit' : 'other',
+                    status_code: response.status,
+                    error_message: errorMessage
+                });
+            }
             
             // Handle rate limit errors specifically
             if (response.status === 429) {
@@ -489,6 +551,22 @@ function cleanupStaleJobs() {
 
 // Initialize on load
 document.addEventListener('DOMContentLoaded', () => {
+    // Wait a bit for PostHog to initialize
+    setTimeout(() => {
+        if (typeof posthog !== 'undefined') {
+            console.log('PostHog loaded successfully');
+            posthog.capture('$pageview');
+            
+            // Send a test event to verify integration
+            posthog.capture('audiofetch_loaded', {
+                timestamp: new Date().toISOString(),
+                user_agent: navigator.userAgent
+            });
+        } else {
+            console.error('PostHog not loaded - check browser console for errors');
+        }
+    }, 1000);
+    
     // Clean up old download locks from localStorage
     Object.keys(localStorage).forEach(key => {
         if (key.startsWith('downloading_')) {
