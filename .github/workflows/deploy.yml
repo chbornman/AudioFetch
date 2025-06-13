@@ -1,0 +1,127 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Test SSH Connection
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script_stop: true
+          debug: true
+          script: |
+            echo "SSH connection successful!"
+            whoami
+            pwd
+
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script_stop: true
+          debug: true
+          script: |
+            # Navigate to the application directory
+            cd ${{ secrets.VPS_APP_DIR }}
+            
+            # Pull the latest changes from git (optional, if you keep config files there)
+            git pull origin main || true
+            
+            # Create .env file if it doesn't exist or update it
+            cat > .env << EOF
+            PORT=${{ secrets.APP_PORT }}
+            HOST=0.0.0.0
+            LOG_LEVEL=${{ secrets.LOG_LEVEL }}
+            DOWNLOADS_HOST_PATH=${{ secrets.DOWNLOADS_HOST_PATH }}
+            DOWNLOADS_CONTAINER_PATH=/app/downloads
+            EOF
+            
+            # Log in to GitHub Container Registry
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            
+            # Create docker-compose.yml
+            echo 'services:' > docker-compose.yml
+            echo '  web:' >> docker-compose.yml
+            echo '    image: ghcr.io/chbornman/audiofetch:latest' >> docker-compose.yml
+            echo '    restart: unless-stopped' >> docker-compose.yml
+            echo '    ports:' >> docker-compose.yml
+            echo '      - "${PORT}:${PORT}"' >> docker-compose.yml
+            echo '    volumes:' >> docker-compose.yml
+            echo '      - "${DOWNLOADS_HOST_PATH}:${DOWNLOADS_CONTAINER_PATH}"' >> docker-compose.yml
+            echo '    env_file:' >> docker-compose.yml
+            echo '      - .env' >> docker-compose.yml
+            echo '    command: >' >> docker-compose.yml
+            echo '      uvicorn app:app' >> docker-compose.yml
+            echo '        --host ${HOST}' >> docker-compose.yml
+            echo '        --port ${PORT}' >> docker-compose.yml
+            echo '        --log-level ${LOG_LEVEL}' >> docker-compose.yml
+            
+            # Pull the latest image
+            docker compose pull
+            
+            # Stop and remove old containers
+            docker compose down
+            
+            # Start new containers
+            docker compose up -d
+            
+            # Clean up old images
+            docker image prune -f

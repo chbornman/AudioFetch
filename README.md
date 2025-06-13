@@ -50,7 +50,7 @@ export SECRET_KEY="your-secret-key"           # For JWT tokens
 
 ### Using Docker
 
-1. Copy the example environment file and fill in your real values:
+1. Copy the example environment file and fill in your actual values:
 
    ```bash
    cp .env.example .env
@@ -116,7 +116,7 @@ python main.py https://example.com/audiobook my-audiobook --plugin plyr --worker
 
 ## Architecture
 
-### Backend (FastAPI)
+### Backend (Python FastAPI)
 
 - WebSocket support for real-time updates
 - JWT-based authentication for server mode
@@ -130,7 +130,6 @@ python main.py https://example.com/audiobook my-audiobook --plugin plyr --worker
 - Vanilla JavaScript with WebSocket client
 - Real-time progress bars with detailed status
 - localStorage synchronization between tabs
-- Responsive design
 - No framework dependencies
 
 ### Download Flow
