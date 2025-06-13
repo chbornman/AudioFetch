@@ -470,6 +470,7 @@ async def process_download(job_id: str, download_request: DownloadRequest):
             download_request.name = generate_name_from_url(str(download_request.url))
             job['status'] = 'detecting'
             job['message'] = f"Generated name: {download_request.name}"
+            job['download_name'] = download_request.name  # Update job with generated name
             logger.info(f"[Job {job_id[:8]}] Generated name: {download_request.name}")
             await broadcast_job_update(job_id, job)
         
@@ -713,7 +714,8 @@ async def start_download(request: Request, download_request: DownloadRequest, ba
         'created_at': datetime.now(),
         'completed_at': None,
         'request': download_request,
-        'download_mode': download_request.download_mode
+        'download_mode': download_request.download_mode,
+        'download_name': download_request.name  # Set name immediately
     }
     
     logger.info(f"[Job {job_id[:8]}] Created new download job in {download_request.download_mode} mode")

@@ -20,6 +20,11 @@ function initWebSocket() {
             clearInterval(fallbackPollID);
             fallbackPollID = null;
         }
+        // Don't clear jobs immediately - let loadJobs handle updates
+        // Reload jobs after reconnect with cleanup
+        setTimeout(() => {
+            loadJobsWithCleanup();
+        }, 100);
     };
     
     ws.onmessage = (event) => {
@@ -170,7 +175,36 @@ async function startDownload() {
             }
         } else {
             const error = await response.json();
-            showNotification(error.detail || 'Failed to start download', 'error');
+            let errorMessage = error.detail || 'Failed to start download';
+            
+            // Handle rate limit errors specifically
+            if (response.status === 429) {
+                errorMessage = 'Rate limit exceeded. Please wait a minute before trying again.';
+                
+                // Disable submit button temporarily with countdown
+                const submitBtn = document.querySelector('button[onclick="submitDownload()"]');
+                if (submitBtn) {
+                    submitBtn.disabled = true;
+                    let secondsLeft = 60;
+                    
+                    // Update button text with countdown
+                    const updateCountdown = () => {
+                        submitBtn.textContent = `Rate Limited - Wait ${secondsLeft}s`;
+                        secondsLeft--;
+                        
+                        if (secondsLeft <= 0) {
+                            clearInterval(countdownInterval);
+                            submitBtn.disabled = false;
+                            submitBtn.textContent = 'Start Download';
+                        }
+                    };
+                    
+                    updateCountdown(); // Initial update
+                    const countdownInterval = setInterval(updateCountdown, 1000);
+                }
+            }
+            
+            showNotification(errorMessage, 'error');
         }
     } catch (error) {
         console.error('Download error:', error);
@@ -437,6 +471,20 @@ function cleanupStaleJobs() {
             }
         }
     });
+    
+    // Also cleanup completed/error/cancelled jobs older than 30 minutes
+    const completedStaleTime = 30 * 60 * 1000; // 30 minutes
+    document.querySelectorAll('.job-item.completed, .job-item.error, .job-item.cancelled').forEach(jobElement => {
+        const timeElement = jobElement.querySelector('.job-time');
+        if (timeElement) {
+            const jobTime = new Date(timeElement.textContent);
+            if (now - jobTime > completedStaleTime) {
+                const jobId = jobElement.id.replace('job-', '');
+                console.log(`Auto-clearing old completed job: ${jobId}`);
+                clearJob(jobId);
+            }
+        }
+    });
 }
 
 // Initialize on load
@@ -528,5 +576,37 @@ async function loadJobs() {
         }
     } catch (error) {
         console.error('Load jobs error:', error);
+    }
+}
+
+async function loadJobsWithCleanup() {
+    try {
+        const response = await fetch('/api/jobs');
+        if (response.ok) {
+            const jobs = await response.json();
+            const jobsList = document.getElementById('jobs-list');
+            
+            // Get all current job IDs from server
+            const serverJobIds = new Set(jobs.map(job => job.job_id));
+            
+            // Remove any jobs from UI that are no longer on server
+            Array.from(jobsList.children).forEach(jobElement => {
+                const jobId = jobElement.id.replace('job-', '');
+                if (!serverJobIds.has(jobId)) {
+                    console.log(`Removing orphaned job from UI: ${jobId}`);
+                    jobElement.remove();
+                }
+            });
+            
+            // Update or add jobs from server
+            jobs.forEach(job => {
+                updateJobInList(job.job_id, job);
+            });
+            
+            // Run cleanup for stale jobs
+            cleanupStaleJobs();
+        }
+    } catch (error) {
+        console.error('Load jobs with cleanup error:', error);
     }
 }
