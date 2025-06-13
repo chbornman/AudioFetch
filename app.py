@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, Depends, status
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, Depends, status, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, HttpUrl
 from typing import Optional, List, Dict, AsyncGenerator
 import asyncio
@@ -23,13 +25,17 @@ from passlib.context import CryptContext
 import jwt
 from jwt import PyJWTError
 from dotenv import load_dotenv
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 # Load environment variables
 load_dotenv()
 
 # Configure logging with more detail
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=getattr(logging, log_level, logging.INFO),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
@@ -43,8 +49,52 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from player_info import get_player_info
 from downloader import download_tracks
+from security import validate_url, sanitize_filename, validate_safe_path, is_valid_job_id
 
 app = FastAPI(title="AudioFetch", version="2.0.0")
+
+# Configure rate limiting
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Configure CORS
+origins = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else []
+if origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+# Add trusted host middleware for security
+allowed_hosts = os.getenv("ALLOWED_HOSTS", "").split(",") if os.getenv("ALLOWED_HOSTS") else ["*"]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+
+# Add security headers middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    
+    # Add CSP header for HTML responses
+    if request.url.path == "/" or request.url.path.endswith(".html"):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: https:; "
+            "font-src 'self'; "
+            "connect-src 'self' ws: wss:; "
+            "frame-ancestors 'none';"
+        )
+    
+    return response
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -54,10 +104,16 @@ security = HTTPBasic()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Configuration
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-here-change-in-production")
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise ValueError("SECRET_KEY environment variable must be set")
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")  # Change this!
+
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+if not ADMIN_PASSWORD:
+    raise ValueError("ADMIN_PASSWORD environment variable must be set")
 
 # Store active websocket connections
 active_connections: Dict[str, WebSocket] = {}
@@ -394,22 +450,22 @@ def generate_name_from_url(url: str) -> str:
     logger.debug(f"Generated name from URL: {name}")
     return name
 
-async def process_download(job_id: str, request: DownloadRequest):
+async def process_download(job_id: str, download_request: DownloadRequest):
     """Background task to process download."""
     job = download_jobs[job_id]
-    logger.info(f"[Job {job_id[:8]}] Starting download process in {request.download_mode} mode")
+    logger.info(f"[Job {job_id[:8]}] Starting download process in {download_request.download_mode} mode")
     
     try:
         # Generate name if not provided
-        if not request.name:
-            request.name = generate_name_from_url(str(request.url))
+        if not download_request.name:
+            download_request.name = generate_name_from_url(str(download_request.url))
             job['status'] = 'detecting'
-            job['message'] = f"Generated name: {request.name}"
-            logger.info(f"[Job {job_id[:8]}] Generated name: {request.name}")
+            job['message'] = f"Generated name: {download_request.name}"
+            logger.info(f"[Job {job_id[:8]}] Generated name: {download_request.name}")
             await broadcast_job_update(job_id, job)
         
         # Detect plugin if not specified
-        if not request.plugin:
+        if not download_request.plugin:
             job['status'] = 'detecting'
             job['message'] = "Fetching page content..."
             logger.info(f"[Job {job_id[:8]}] Fetching page content...")
@@ -422,7 +478,7 @@ async def process_download(job_id: str, request: DownloadRequest):
             logger.info(f"[Job {job_id[:8]}] Analyzing page for audio players...")
             await broadcast_job_update(job_id, job)
             
-            detections = detect_plugin(request.url)
+            detections = detect_plugin(download_request.url)
             
             if not detections:
                 raise Exception("Could not detect any audio player on this page")
@@ -433,15 +489,15 @@ async def process_download(job_id: str, request: DownloadRequest):
                 unsupported_names = [get_player_info(d[0])['name'] for d in detections]
                 raise Exception(f"Detected unsupported players: {', '.join(unsupported_names)}")
             
-            request.plugin = supported[0][0]
-            job['message'] = f"Detected player: {get_player_info(request.plugin)['name']}"
-            logger.info(f"[Job {job_id[:8]}] Detected player: {get_player_info(request.plugin)['name']}")
+            download_request.plugin = supported[0][0]
+            job['message'] = f"Detected player: {get_player_info(download_request.plugin)['name']}"
+            logger.info(f"[Job {job_id[:8]}] Detected player: {get_player_info(download_request.plugin)['name']}")
             await broadcast_job_update(job_id, job)
         
         # Import and run the scraper
         job['status'] = 'detecting'
-        job['message'] = f"Loading {get_player_info(request.plugin)['name']} scraper..."
-        logger.info(f"[Job {job_id[:8]}] Loading {get_player_info(request.plugin)['name']} scraper...")
+        job['message'] = f"Loading {get_player_info(download_request.plugin)['name']} scraper..."
+        logger.info(f"[Job {job_id[:8]}] Loading {get_player_info(download_request.plugin)['name']} scraper...")
         await broadcast_job_update(job_id, job)
         
         await asyncio.sleep(0.3)
@@ -450,12 +506,12 @@ async def process_download(job_id: str, request: DownloadRequest):
         logger.info(f"[Job {job_id[:8]}] Extracting audio tracks from page...")
         await broadcast_job_update(job_id, job)
         
-        if request.plugin == 'simple' or request.plugin == 'simple_mp3':
+        if download_request.plugin == 'simple' or download_request.plugin == 'simple_mp3':
             module_name = 'simple_scrape_mp3'
-        elif request.plugin == 'plyr':
+        elif download_request.plugin == 'plyr':
             module_name = 'scrape_plyr'
         else:
-            raise Exception(f"Unknown plugin: {request.plugin}")
+            raise Exception(f"Unknown plugin: {download_request.plugin}")
         
         try:
             scraper = importlib.import_module(module_name)
@@ -463,7 +519,7 @@ async def process_download(job_id: str, request: DownloadRequest):
             raise Exception(f"Failed to import scraper module '{module_name}': {str(e)}")
         
         try:
-            tracks = scraper.scrape(str(request.url), request.name, request.name)
+            tracks = scraper.scrape(str(download_request.url), download_request.name, download_request.name)
         except Exception as e:
             raise Exception(f"Scraper error: {str(e)}")
         
@@ -472,13 +528,13 @@ async def process_download(job_id: str, request: DownloadRequest):
         
         job['message'] = f"Found {len(tracks)} tracks. Downloading..."
         job['progress'] = {'total': len(tracks), 'completed': 0, 'failed': 0}
-        job['download_mode'] = request.download_mode
-        job['download_name'] = request.name
+        job['download_mode'] = download_request.download_mode
+        job['download_name'] = download_request.name
         job['tracks'] = tracks  # Store tracks for streaming
-        logger.info(f"[Job {job_id[:8]}] Found {len(tracks)} tracks. Starting download in {request.download_mode} mode...")
+        logger.info(f"[Job {job_id[:8]}] Found {len(tracks)} tracks. Starting download in {download_request.download_mode} mode...")
         await broadcast_job_update(job_id, job)
         
-        if request.download_mode == "browser":
+        if download_request.download_mode == "browser":
             # For browser mode, we'll use WebSocket streaming
             job['status'] = 'streaming'
             job['message'] = f"Ready to stream {len(tracks)} tracks"
@@ -508,7 +564,7 @@ async def process_download(job_id: str, request: DownloadRequest):
             logger.info(f"[Job {job_id[:8]}] Browser mode: Ready for streaming")
         else:
             # Server mode - check authentication
-            if not request.auth_token or not verify_token(request.auth_token):
+            if not download_request.auth_token or not verify_token(download_request.auth_token):
                 raise Exception("Authentication required for server downloads")
             
             # Download tracks with async progress callback
@@ -531,9 +587,9 @@ async def process_download(job_id: str, request: DownloadRequest):
             
             result = await download_tracks_async(
                 tracks, 
-                request.name,
-                prefix=request.name if request.plugin in ['simple', 'simple_mp3'] else None,
-                max_workers=request.workers,
+                download_request.name,
+                prefix=download_request.name if download_request.plugin in ['simple', 'simple_mp3'] else None,
+                max_workers=download_request.workers,
                 progress_callback=update_progress,
                 job_id=job_id
             )
@@ -556,15 +612,24 @@ async def process_download(job_id: str, request: DownloadRequest):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    # Get token from query parameters
+    token = websocket.query_params.get("token")
+    
+    # Verify token if provided (optional authentication)
+    authenticated = False
+    if token:
+        authenticated = verify_token(token)
+    
     await websocket.accept()
     connection_id = str(uuid.uuid4())
     active_connections[connection_id] = websocket
-    logger.info(f"WebSocket connected: {connection_id}")
+    logger.info(f"WebSocket connected: {connection_id} (authenticated: {authenticated})")
     
     try:
         while True:
             # Keep connection alive
-            await websocket.receive_text()
+            data = await websocket.receive_text()
+            # Could add message handling here if needed
     except WebSocketDisconnect:
         active_connections.pop(connection_id, None)
         logger.info(f"WebSocket disconnected: {connection_id}")
@@ -576,9 +641,10 @@ async def root():
         return f.read()
 
 @app.post("/api/auth/login")
-async def login(request: LoginRequest):
+@limiter.limit("3/minute")
+async def login(request: Request, login_data: LoginRequest):
     """Login endpoint for server download authentication."""
-    if request.password != ADMIN_PASSWORD:
+    if login_data.password != ADMIN_PASSWORD:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect password",
@@ -593,25 +659,34 @@ async def login(request: LoginRequest):
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.post("/api/download", response_model=DownloadStatus)
-async def start_download(request: DownloadRequest, background_tasks: BackgroundTasks):
+@limiter.limit("5/minute")
+async def start_download(request: Request, download_request: DownloadRequest, background_tasks: BackgroundTasks):
     """Start a new download job."""
+    # Validate URL for security
+    if not validate_url(str(download_request.url)):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or unsafe URL. Only HTTP/HTTPS URLs are allowed, and internal network addresses are blocked."
+        )
+    
     job_id = str(uuid.uuid4())
     
     # For server mode, verify authentication
-    if request.download_mode == "server":
-        if not request.auth_token or not verify_token(request.auth_token):
+    if download_request.download_mode == "server":
+        if not download_request.auth_token or not verify_token(download_request.auth_token):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Authentication required for server downloads"
             )
         
-        # Check if directory already exists
-        if request.name:
-            downloads_dir = os.path.join('downloads', request.name)
+        # Sanitize the name if provided
+        if download_request.name:
+            download_request.name = sanitize_filename(download_request.name)
+            downloads_dir = os.path.join('downloads', download_request.name)
             if os.path.exists(downloads_dir):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Directory 'downloads/{request.name}' already exists. Please choose a different name."
+                    detail=f"Directory 'downloads/{download_request.name}' already exists. Please choose a different name."
                 )
     
     # Create job entry
@@ -623,14 +698,14 @@ async def start_download(request: DownloadRequest, background_tasks: BackgroundT
         'result': None,
         'created_at': datetime.now(),
         'completed_at': None,
-        'request': request,
-        'download_mode': request.download_mode
+        'request': download_request,
+        'download_mode': download_request.download_mode
     }
     
-    logger.info(f"[Job {job_id[:8]}] Created new download job in {request.download_mode} mode")
+    logger.info(f"[Job {job_id[:8]}] Created new download job in {download_request.download_mode} mode")
     
     # Start background task
-    background_tasks.add_task(process_download, job_id, request)
+    background_tasks.add_task(process_download, job_id, download_request)
     
     return DownloadStatus(**download_jobs[job_id])
 
@@ -695,6 +770,9 @@ async def stream_download(job_id: str):
 @app.get("/api/status/{job_id}", response_model=DownloadStatus)
 async def get_status(job_id: str):
     """Get the status of a download job."""
+    if not is_valid_job_id(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID format")
+    
     if job_id not in download_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     
@@ -708,6 +786,9 @@ async def list_jobs():
 @app.delete("/api/jobs/{job_id}")
 async def delete_job(job_id: str):
     """Delete a completed job."""
+    if not is_valid_job_id(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID format")
+    
     if job_id not in download_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     
@@ -725,6 +806,9 @@ async def delete_job(job_id: str):
 @app.post("/api/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str):
     """Cancel an active job."""
+    if not is_valid_job_id(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job ID format")
+    
     if job_id not in download_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     
@@ -781,7 +865,12 @@ async def delete_download(name: str, auth_token: Optional[str] = None):
             detail="Authentication required"
         )
     
-    dir_path = os.path.join('downloads', name)
+    # Validate path to prevent directory traversal
+    try:
+        dir_path = validate_safe_path('downloads', name)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid directory name")
+    
     if not os.path.exists(dir_path):
         raise HTTPException(status_code=404, detail="Download not found")
     
@@ -799,7 +888,12 @@ async def download_as_zip(name: str, auth_token: Optional[str] = None):
         )
     
     logger.info(f"Creating ZIP for download: {name}")
-    dir_path = os.path.join('downloads', name)
+    # Validate path to prevent directory traversal
+    try:
+        dir_path = validate_safe_path('downloads', name)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid directory name")
+    
     if not os.path.exists(dir_path):
         raise HTTPException(status_code=404, detail="Download not found")
     

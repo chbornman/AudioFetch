@@ -92,6 +92,9 @@ jobs:
             LOG_LEVEL=${{ secrets.LOG_LEVEL }}
             DOWNLOADS_HOST_PATH=${{ secrets.DOWNLOADS_HOST_PATH }}
             DOWNLOADS_CONTAINER_PATH=/app/downloads
+            SECRET_KEY=${{ secrets.SECRET_KEY }}
+            ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
+            ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }}
             EOF
             
             # Log in to GitHub Container Registry

@@ -186,7 +186,9 @@ Log format includes:
 1. **Authentication**: Server mode requires password
 2. **CORS**: Configure for production deployment
 3. **File paths**: Sanitized to prevent directory traversal
-4. **Rate limiting**: Consider adding for production
+4. **Rate limiting**: Built-in rate limits protect against abuse
+   - Login endpoint: 3 attempts per minute
+   - Download endpoint: 5 requests per minute
 5. **HTTPS**: Use reverse proxy with SSL in production
 
 ## Troubleshooting
