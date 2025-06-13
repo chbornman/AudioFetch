@@ -2,6 +2,7 @@
 let ws = null;
 let authToken = null;
 let isAuthenticated = false;
+let connectionId = null;  // Track our WebSocket connection ID
 // Fallback polling if WebSocket disconnects
 let fallbackPollID = null;
 const fallbackPollInterval = 30000; // ms
@@ -23,7 +24,11 @@ function initWebSocket() {
     
     ws.onmessage = (event) => {
         const message = JSON.parse(event.data);
-        if (message.type === 'job_update') {
+        
+        if (message.type === 'connection_established') {
+            connectionId = message.connection_id;
+            console.log('WebSocket connection established with ID:', connectionId);
+        } else if (message.type === 'job_update') {
             updateJobInList(message.job_id, message.data);
             
             // If a server download completes, refresh the server downloads list
@@ -39,6 +44,7 @@ function initWebSocket() {
     ws.onclose = () => {
         console.log('WebSocket disconnected');
         updateConnectionStatus(false);
+        connectionId = null;  // Reset connection ID
         // Start fallback polling
         if (!fallbackPollID) {
             fallbackPollID = setInterval(loadJobs, fallbackPollInterval);
@@ -138,7 +144,8 @@ async function startDownload() {
         plugin: plugin || null,
         workers,
         download_mode: downloadMode,
-        auth_token: downloadMode === 'server' ? authToken : null
+        auth_token: downloadMode === 'server' ? authToken : null,
+        connection_id: connectionId  // Include our WebSocket connection ID
     };
     
     try {
@@ -235,7 +242,11 @@ function createJobElement(job) {
             actionsHtml = `<span class="downloading-status">💾 Saving to server...</span>`;
         }
     } else if (job.status === 'streaming' && job.download_mode === 'browser') {
-        actionsHtml = `<span class="streaming-status">✅ Ready! Download will start automatically...</span>`;
+        actionsHtml = `
+            <span class="streaming-status">✅ Ready!</span>
+            <button onclick="streamDownload('${job.job_id}')" class="btn-download">Download Now</button>
+            <button onclick="cancelJob('${job.job_id}')" class="btn-cancel">Cancel</button>
+        `;
     } else if (job.status === 'completed' || job.status === 'error' || job.status === 'cancelled') {
         actionsHtml = `<button onclick="clearJob('${job.job_id}')" class="btn-clear">Clear</button>`;
     }
@@ -410,6 +421,24 @@ function formatSize(bytes) {
     return `${size.toFixed(1)} ${units[unitIndex]}`;
 }
 
+// Auto-cleanup stale streaming jobs (older than 10 minutes)
+function cleanupStaleJobs() {
+    const staleTime = 10 * 60 * 1000; // 10 minutes
+    const now = new Date();
+    
+    document.querySelectorAll('.job-item.streaming').forEach(jobElement => {
+        const timeElement = jobElement.querySelector('.job-time');
+        if (timeElement) {
+            const jobTime = new Date(timeElement.textContent);
+            if (now - jobTime > staleTime) {
+                const jobId = jobElement.id.replace('job-', '');
+                console.log(`Auto-canceling stale streaming job: ${jobId}`);
+                cancelJob(jobId);
+            }
+        }
+    });
+}
+
 // Initialize on load
 document.addEventListener('DOMContentLoaded', () => {
     // Clean up old download locks from localStorage
@@ -431,6 +460,12 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Initialize WebSocket
     initWebSocket();
+    
+    // Run cleanup check on page load
+    cleanupStaleJobs();
+    
+    // Run cleanup check every minute
+    setInterval(cleanupStaleJobs, 60000);
     
     // Toggle download mode & workers inputs based on auth & mode selection
     const workersGroup = document.getElementById('workers-group');

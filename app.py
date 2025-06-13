@@ -121,6 +121,8 @@ active_connections: Dict[str, WebSocket] = {}
 # Store download jobs and cancellation flags
 download_jobs = {}
 cancel_flags = {}
+# Track which connection initiated each job
+job_owners = {}  # job_id -> connection_id mapping
 
 class DownloadRequest(BaseModel):
     url: HttpUrl
@@ -129,6 +131,7 @@ class DownloadRequest(BaseModel):
     workers: int = 5
     download_mode: str = "browser"  # "server" or "browser"
     auth_token: Optional[str] = None  # For server mode
+    connection_id: Optional[str] = None  # WebSocket connection ID
 
 class DownloadStatus(BaseModel):
     job_id: str
@@ -195,18 +198,24 @@ async def send_job_update(websocket: WebSocket, job_id: str, job_data: dict):
         logger.warning(f"Failed to send to websocket: {e}")
 
 async def broadcast_job_update(job_id: str, job_data: dict):
-    """Broadcast job updates to all connected websockets."""
-    disconnected = []
-    for conn_id, websocket in active_connections.items():
-        try:
-            await send_job_update(websocket, job_id, job_data)
-        except Exception as e:
-            logger.warning(f"Failed to send to websocket {conn_id}: {e}")
-            disconnected.append(conn_id)
+    """Send job updates only to the connection that owns the job."""
+    # Check if this job has an owner
+    owner_conn_id = job_owners.get(job_id)
     
-    # Clean up disconnected websockets
-    for conn_id in disconnected:
-        active_connections.pop(conn_id, None)
+    if owner_conn_id and owner_conn_id in active_connections:
+        # Send update only to the owner
+        try:
+            await send_job_update(active_connections[owner_conn_id], job_id, job_data)
+        except Exception as e:
+            logger.warning(f"Failed to send to job owner {owner_conn_id}: {e}")
+            # Clean up disconnected websocket
+            active_connections.pop(owner_conn_id, None)
+            job_owners.pop(job_id, None)
+    else:
+        # If no owner or owner disconnected, clean up job owner tracking
+        if job_id in job_owners:
+            logger.warning(f"Job {job_id} owner {owner_conn_id} not found in active connections")
+            job_owners.pop(job_id, None)
 
 async def stream_zip_truly(tracks: List[Dict], job_id: str) -> AsyncGenerator[bytes, None]:
     """
@@ -540,25 +549,17 @@ async def process_download(job_id: str, download_request: DownloadRequest):
             job['message'] = f"Ready to stream {len(tracks)} tracks"
             job['stream_ready'] = True
             
-            # Only send auto_download flag to ONE connection
-            if active_connections:
-                # Pick a single connection to trigger the download
-                first_conn_id = next(iter(active_connections))
-                
-                # Send to all OTHER connections without auto_download
-                for conn_id, websocket in active_connections.items():
-                    if conn_id == first_conn_id:
-                        # This connection gets the auto_download flag
-                        job_with_auto = job.copy()
-                        job_with_auto['auto_download'] = True
-                        await send_job_update(websocket, job_id, job_with_auto)
-                        logger.info(f"[Job {job_id[:8]}] Sent auto-download trigger to connection {conn_id[:8]}")
-                    else:
-                        # Other connections get update without auto_download
-                        await send_job_update(websocket, job_id, job)
-                        logger.info(f"[Job {job_id[:8]}] Sent update without auto-download to connection {conn_id[:8]}")
+            # Send auto_download flag only to the connection that owns this job
+            owner_conn_id = job_owners.get(job_id)
+            if owner_conn_id and owner_conn_id in active_connections:
+                # Send with auto_download flag to the owner
+                job_with_auto = job.copy()
+                job_with_auto['auto_download'] = True
+                await send_job_update(active_connections[owner_conn_id], job_id, job_with_auto)
+                logger.info(f"[Job {job_id[:8]}] Sent auto-download trigger to owner connection {owner_conn_id[:8]}")
             else:
-                # No connections, just broadcast normally
+                # No owner or owner disconnected, just send normal update
+                logger.warning(f"[Job {job_id[:8]}] No owner connection found for auto-download")
                 await broadcast_job_update(job_id, job)
             
             logger.info(f"[Job {job_id[:8]}] Browser mode: Ready for streaming")
@@ -625,6 +626,12 @@ async def websocket_endpoint(websocket: WebSocket):
     active_connections[connection_id] = websocket
     logger.info(f"WebSocket connected: {connection_id} (authenticated: {authenticated})")
     
+    # Send connection ID to client
+    await websocket.send_json({
+        "type": "connection_established",
+        "connection_id": connection_id
+    })
+    
     try:
         while True:
             # Keep connection alive
@@ -632,6 +639,13 @@ async def websocket_endpoint(websocket: WebSocket):
             # Could add message handling here if needed
     except WebSocketDisconnect:
         active_connections.pop(connection_id, None)
+        
+        # Clean up any jobs owned by this connection
+        jobs_to_clean = [job_id for job_id, owner_id in job_owners.items() if owner_id == connection_id]
+        for job_id in jobs_to_clean:
+            job_owners.pop(job_id, None)
+            logger.info(f"Removed ownership of job {job_id[:8]} from disconnected connection {connection_id[:8]}")
+        
         logger.info(f"WebSocket disconnected: {connection_id}")
 
 @app.get("/", response_class=HTMLResponse)
@@ -703,6 +717,11 @@ async def start_download(request: Request, download_request: DownloadRequest, ba
     }
     
     logger.info(f"[Job {job_id[:8]}] Created new download job in {download_request.download_mode} mode")
+    
+    # Track job owner if connection_id is provided
+    if download_request.connection_id:
+        job_owners[job_id] = download_request.connection_id
+        logger.info(f"[Job {job_id[:8]}] Assigned to connection {download_request.connection_id[:8]}")
     
     # Start background task
     background_tasks.add_task(process_download, job_id, download_request)

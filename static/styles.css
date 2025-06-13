@@ -233,6 +233,15 @@ button {
   background: #d97706;
 }
 
+.btn-download {
+  background: var(--success-color);
+  color: white;
+}
+
+.btn-download:hover {
+  background: #059669;
+}
+
 .btn-delete,
 .btn-clear {
   background: var(--error-color);
