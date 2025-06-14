@@ -47,12 +47,12 @@ body {
 }
 
 /* Info Section */
-.info-section {
-  background: var(--card-bg);
-  border-radius: 12px;
+section.info-section {
+  background: var(--surface);
+  border-radius: var(--radius);
   padding: 24px;
   margin-bottom: 32px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--shadow-sm);
 }
 
 .info-section h2 {

@@ -179,12 +179,15 @@ async function startDownload() {
     // Track download attempt
     if (typeof posthog !== 'undefined') {
         posthog.capture('download_started', {
+            url: url,  // Full URL for tracking
             url_domain: new URL(url).hostname,
             plugin: plugin || 'auto-detect',
             workers: workers,
             download_mode: downloadMode,
+            custom_name: name || 'none',
             has_custom_name: !!name,
-            is_authenticated: isAuthenticated
+            is_authenticated: isAuthenticated,
+            timestamp: new Date().toISOString()
         });
     }
     

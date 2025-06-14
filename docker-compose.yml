@@ -1,4 +1,22 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-audiofetch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-audiofetch_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-audiofetch_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-audiofetch} -d ${POSTGRES_DB:-audiofetch_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   web:
     build: .
     restart: unless-stopped
@@ -9,9 +27,31 @@ services:
       - "${DOWNLOADS_HOST_PATH}:${DOWNLOADS_CONTAINER_PATH}"
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-audiofetch}:${POSTGRES_PASSWORD:-audiofetch_secret}@postgres:5432/${POSTGRES_DB:-audiofetch_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
     command: >
       uvicorn app:app
         --host ${HOST}
         --port ${PORT}
         --log-level ${LOG_LEVEL}
         ${AUTO_RELOAD:+--reload}
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    depends_on:
+      - postgres
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+volumes:
+  postgres_data:
+  pgadmin_data:

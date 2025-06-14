@@ -28,6 +28,10 @@ from dotenv import load_dotenv
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from database import (
+    init_db_pool, close_db_pool, log_download_request,
+    update_download_status, get_download_stats
+)
 
 # Load environment variables
 load_dotenv()
@@ -52,6 +56,16 @@ from downloader import download_tracks
 from security import validate_url, sanitize_filename, validate_safe_path, is_valid_job_id
 
 app = FastAPI(title="AudioFetch", version="2.0.0")
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database pool on startup."""
+    await init_db_pool()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close database pool on shutdown."""
+    await close_db_pool()
 
 # Configure rate limiting
 limiter = Limiter(key_func=get_remote_address)
@@ -600,6 +614,16 @@ async def process_download(job_id: str, download_request: DownloadRequest):
             job['message'] = f"Downloaded {result['successful']} tracks successfully"
             job['result'] = result
             job['completed_at'] = datetime.now()
+            
+            # Update database with completion info
+            total_size = sum(result.get('file_sizes', {}).values())
+            await update_download_status(
+                job_id=job_id,
+                status='completed',
+                tracks_count=result['successful'],
+                total_size_bytes=total_size
+            )
+            
             await broadcast_job_update(job_id, job)
             logger.info(f"[Job {job_id[:8]}] Completed: {result['successful']} successful, {result['failed']} failed")
         
@@ -608,6 +632,14 @@ async def process_download(job_id: str, download_request: DownloadRequest):
         job['status'] = 'error'
         job['message'] = str(e)
         job['completed_at'] = datetime.now()
+        
+        # Update database with error
+        await update_download_status(
+            job_id=job_id,
+            status='error',
+            error_message=str(e)
+        )
+        
         await broadcast_job_update(job_id, job)
         logger.error(f"[Job {job_id[:8]}] Error: {str(e)}")
         logger.error(traceback.format_exc())
@@ -725,6 +757,25 @@ async def start_download(request: Request, download_request: DownloadRequest, ba
         job_owners[job_id] = download_request.connection_id
         logger.info(f"[Job {job_id[:8]}] Assigned to connection {download_request.connection_id[:8]}")
     
+    # Log to database
+    user_agent = request.headers.get("user-agent")
+    client_ip = request.client.host if request.client else None
+    url_domain = urlparse(str(download_request.url)).netloc
+    
+    await log_download_request(
+        job_id=job_id,
+        url=str(download_request.url),
+        url_domain=url_domain,
+        custom_name=download_request.name,
+        plugin=download_request.plugin,
+        workers=download_request.workers,
+        download_mode=download_request.download_mode,
+        is_authenticated=bool(download_request.auth_token),
+        connection_id=download_request.connection_id,
+        user_agent=user_agent,
+        ip_address=client_ip
+    )
+    
     # Start background task
     background_tasks.add_task(process_download, job_id, download_request)
     
@@ -769,12 +820,28 @@ async def stream_download(job_id: str):
             job['completed_at'] = datetime.now()
             await broadcast_job_update(job_id, job)
             
+            # Update database
+            progress = job.get('progress', {})
+            tracks_count = progress.get('completed', len(tracks))
+            await update_download_status(
+                job_id=job_id,
+                status='completed',
+                tracks_count=tracks_count
+            )
+            
         except Exception as e:
             job['status'] = 'error'
             job['message'] = f"Download failed: {str(e)}"
             job['completed_at'] = datetime.now()
             await broadcast_job_update(job_id, job)
             logger.error(f"[Job {job_id[:8]}] Streaming error: {str(e)}")
+            
+            # Update database with error
+            await update_download_status(
+                job_id=job_id,
+                status='error',
+                error_message=str(e)
+            )
             raise
     
     # Return true streaming response
@@ -843,10 +910,35 @@ async def cancel_job(job_id: str):
     job['message'] = 'Download cancelled by user'
     job['completed_at'] = datetime.now()
     
+    # Update database
+    await update_download_status(
+        job_id=job_id,
+        status='cancelled'
+    )
+    
     await broadcast_job_update(job_id, job)
     logger.info(f"[Job {job_id[:8]}] Cancelled by user")
     
     return {"message": "Job cancelled"}
+
+@app.get("/api/stats")
+async def get_stats(auth_token: Optional[str] = None):
+    """Get download statistics from the database (admin only)."""
+    # Verify authentication
+    if not auth_token or not verify_token(auth_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+    
+    stats = await get_download_stats()
+    if stats is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Database not available"
+        )
+    
+    return stats
 
 @app.get("/api/downloads")
 async def list_downloads(auth_token: Optional[str] = None):
