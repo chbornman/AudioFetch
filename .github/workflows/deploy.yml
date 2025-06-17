@@ -103,6 +103,7 @@ jobs:
             PGADMIN_EMAIL=${{ secrets.PGADMIN_EMAIL }}
             PGADMIN_PASSWORD=${{ secrets.PGADMIN_PASSWORD }}
             PGADMIN_PORT=${{ secrets.PGADMIN_PORT }}
+            CONTACT_EMAIL=${{ secrets.CONTACT_EMAIL }}
             EOF
 
             # Log in to GitHub Container Registry

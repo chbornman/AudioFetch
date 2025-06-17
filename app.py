@@ -139,6 +139,8 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 if not ADMIN_PASSWORD:
     raise ValueError("ADMIN_PASSWORD environment variable must be set")
 
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL")
+
 # Store active websocket connections
 active_connections: Dict[str, WebSocket] = {}
 
@@ -1123,6 +1125,21 @@ async def download_as_zip(name: str, auth_token: Optional[str] = None):
             "Content-Length": str(zip_size)
         }
     )
+
+@app.get("/api/config")
+async def get_config():
+    """Get application configuration for frontend."""
+    config = {
+        "version": "2.0.0",
+        "supported_formats": ["MP3", "M4A", "AAC", "OGG", "OPUS", "WebM", "WAV", "FLAC"],
+        "supported_plugins": ["plyr", "simple_mp3", "mediaelement"]
+    }
+    
+    # Only include contact_email if it's configured
+    if CONTACT_EMAIL:
+        config["contact_email"] = CONTACT_EMAIL
+    
+    return config
 
 @app.on_event("startup")
 async def startup_event():

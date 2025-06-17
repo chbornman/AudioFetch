@@ -660,8 +660,47 @@ function categorizeError(errorMessage) {
     return 'other';
 }
 
+// Load configuration from API
+async function loadConfig() {
+    const contactEmailElement = document.getElementById('contact-email');
+    
+    try {
+        const response = await fetch('/api/config');
+        if (response.ok) {
+            const config = await response.json();
+            // Update contact email in UI
+            if (contactEmailElement && config.contact_email) {
+                contactEmailElement.textContent = config.contact_email;
+                contactEmailElement.href = `mailto:${config.contact_email}`;
+            } else {
+                // No contact email configured, hide the contact info
+                const contactInfoElement = document.getElementById('contact-info');
+                if (contactInfoElement) {
+                    contactInfoElement.style.display = 'none';
+                }
+            }
+        } else {
+            // If API fails, hide contact info
+            const contactInfoElement = document.getElementById('contact-info');
+            if (contactInfoElement) {
+                contactInfoElement.style.display = 'none';
+            }
+        }
+    } catch (error) {
+        console.error('Failed to load config:', error);
+        // If API fails, hide contact info
+        const contactInfoElement = document.getElementById('contact-info');
+        if (contactInfoElement) {
+            contactInfoElement.style.display = 'none';
+        }
+    }
+}
+
 // Initialize on load
 document.addEventListener('DOMContentLoaded', () => {
+    // Load configuration
+    loadConfig();
+    
     // Wait a bit for PostHog to initialize
     setTimeout(() => {
         if (typeof posthog !== 'undefined') {
