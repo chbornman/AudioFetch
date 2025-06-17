@@ -32,9 +32,19 @@ from database import (
     init_db_pool, close_db_pool, log_download_request,
     update_download_status, get_download_stats
 )
+import posthog
 
 # Load environment variables
 load_dotenv()
+
+# Initialize PostHog
+POSTHOG_API_KEY = os.getenv("POSTHOG_API_KEY", "phc_QWJN9uUxwtVg2XBV4DMVal1XwA85nEYaylFtTg3OdRF")
+if POSTHOG_API_KEY:
+    posthog.project_api_key = POSTHOG_API_KEY
+    posthog.host = 'https://us.i.posthog.com'
+    logger.info("PostHog initialized for server-side tracking")
+else:
+    logger.warning("PostHog API key not found, server-side tracking disabled")
 
 # Configure logging with more detail
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -516,6 +526,21 @@ async def process_download(job_id: str, download_request: DownloadRequest):
             download_request.plugin = supported[0][0]
             job['message'] = f"Detected player: {get_player_info(download_request.plugin)['name']}"
             logger.info(f"[Job {job_id[:8]}] Detected player: {get_player_info(download_request.plugin)['name']}")
+            
+            # Track plugin detection
+            if POSTHOG_API_KEY:
+                all_detected = [{'plugin': d[0], 'supported': d[1]} for d in detections]
+                posthog.capture(
+                    distinct_id=job_owners.get(job_id, 'anonymous'),
+                    event='server_plugin_detected',
+                    properties={
+                        'job_id': job_id,
+                        'selected_plugin': download_request.plugin,
+                        'all_detected_plugins': all_detected,
+                        'url_domain': urlparse(str(download_request.url)).netloc
+                    }
+                )
+            
             await broadcast_job_update(job_id, job)
         
         # Import and run the scraper
@@ -624,6 +649,24 @@ async def process_download(job_id: str, download_request: DownloadRequest):
                 total_size_bytes=total_size
             )
             
+            # Track server-side completion
+            if POSTHOG_API_KEY:
+                duration_seconds = (job['completed_at'] - job['created_at']).total_seconds()
+                posthog.capture(
+                    distinct_id=job_owners.get(job_id, 'anonymous'),
+                    event='server_download_completed',
+                    properties={
+                        'job_id': job_id,
+                        'plugin': download_request.plugin,
+                        'tracks_count': result['successful'],
+                        'failed_tracks': result['failed'],
+                        'total_size_bytes': total_size,
+                        'duration_seconds': duration_seconds,
+                        'download_mode': download_request.download_mode,
+                        'workers': download_request.workers
+                    }
+                )
+            
             await broadcast_job_update(job_id, job)
             logger.info(f"[Job {job_id[:8]}] Completed: {result['successful']} successful, {result['failed']} failed")
         
@@ -639,6 +682,26 @@ async def process_download(job_id: str, download_request: DownloadRequest):
             status='error',
             error_message=str(e)
         )
+        
+        # Track server-side error
+        if POSTHOG_API_KEY:
+            error_category = 'plugin_error' if 'plugin' in str(e).lower() else 'other'
+            if 'detect' in str(e).lower():
+                error_category = 'detection_error'
+            elif 'timeout' in str(e).lower():
+                error_category = 'timeout'
+            
+            posthog.capture(
+                distinct_id=job_owners.get(job_id, 'anonymous'),
+                event='server_download_error',
+                properties={
+                    'job_id': job_id,
+                    'error_message': str(e),
+                    'error_category': error_category,
+                    'plugin': download_request.plugin or 'unknown',
+                    'download_mode': download_request.download_mode
+                }
+            )
         
         await broadcast_job_update(job_id, job)
         logger.error(f"[Job {job_id[:8]}] Error: {str(e)}")
@@ -703,6 +766,17 @@ async def login(request: Request, login_data: LoginRequest):
         data={"sub": "admin"}, expires_delta=access_token_expires
     )
     logger.info("Admin login successful")
+    
+    # Track server-side login
+    if POSTHOG_API_KEY:
+        posthog.capture(
+            distinct_id='admin',
+            event='server_login_successful',
+            properties={
+                'ip_address': request.client.host if request.client else None
+            }
+        )
+    
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.post("/api/download", response_model=DownloadStatus)
@@ -778,6 +852,23 @@ async def start_download(request: Request, download_request: DownloadRequest, ba
     
     # Start background task
     background_tasks.add_task(process_download, job_id, download_request)
+    
+    # Track server-side download request
+    if POSTHOG_API_KEY:
+        posthog.capture(
+            distinct_id=client_ip or 'anonymous',
+            event='server_download_requested',
+            properties={
+                'job_id': job_id,
+                'url_domain': url_domain,
+                'plugin': download_request.plugin or 'auto-detect',
+                'workers': download_request.workers,
+                'download_mode': download_request.download_mode,
+                'has_custom_name': bool(download_request.name),
+                'is_authenticated': bool(download_request.auth_token),
+                'user_agent': user_agent
+            }
+        )
     
     return DownloadStatus(**download_jobs[job_id])
 
@@ -1035,12 +1126,43 @@ async def download_as_zip(name: str, auth_token: Optional[str] = None):
 
 @app.on_event("startup")
 async def startup_event():
-    """Log startup message."""
+    """Initialize database and log startup message."""
+    # Initialize database pool
+    await init_db_pool()
+    logger.info("Database pool initialized")
+    
     logger.info("=" * 60)
     logger.info("AudioFetch API v2.0 started successfully!")
     logger.info("Access the web interface at http://localhost:8000")
     logger.info(f"Admin password is: {ADMIN_PASSWORD}")
     logger.info("=" * 60)
+    
+    # Track server startup
+    if POSTHOG_API_KEY:
+        posthog.capture(
+            distinct_id='server',
+            event='server_started',
+            properties={
+                'environment': os.getenv('ENVIRONMENT', 'production'),
+                'log_level': log_level,
+                'rate_limit': os.getenv('RATE_LIMIT', '10/minute')
+            }
+        )
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close database pool and track shutdown."""
+    await close_db_pool()
+    logger.info("Database pool closed")
+    
+    # Track server shutdown
+    if POSTHOG_API_KEY:
+        posthog.capture(
+            distinct_id='server',
+            event='server_shutdown'
+        )
+        # Flush any pending events
+        posthog.shutdown()
 
 if __name__ == "__main__":
     import uvicorn

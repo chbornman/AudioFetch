@@ -36,18 +36,39 @@ function initWebSocket() {
         } else if (message.type === 'job_update') {
             updateJobInList(message.job_id, message.data);
             
-            // Track job status changes
+            // Track job status changes with enhanced metrics
             if (typeof posthog !== 'undefined') {
                 if (message.data.status === 'completed') {
+                    const timeToComplete = downloadStartTime ? Math.floor((Date.now() - downloadStartTime) / 1000) : null;
                     posthog.capture('download_completed', {
                         job_id: message.job_id,
                         download_mode: message.data.download_mode,
-                        tracks_count: message.data.progress?.total || 0
+                        tracks_count: message.data.progress?.total || 0,
+                        // New performance metrics
+                        time_to_complete_seconds: timeToComplete,
+                        bytes_per_second: message.data.total_size_bytes && timeToComplete ? Math.floor(message.data.total_size_bytes / timeToComplete) : null,
+                        total_size_bytes: message.data.total_size_bytes || null
                     });
                 } else if (message.data.status === 'error') {
                     posthog.capture('download_failed', {
                         job_id: message.job_id,
-                        error_message: message.data.message
+                        error_message: message.data.message,
+                        // Enhanced error tracking
+                        error_category: categorizeError(message.data.message),
+                        time_to_error_seconds: downloadStartTime ? Math.floor((Date.now() - downloadStartTime) / 1000) : null,
+                        retry_attempt: downloadAttempts > 1
+                    });
+                } else if (message.data.status === 'detecting') {
+                    // Track plugin detection phase
+                    posthog.capture('plugin_detection_started', {
+                        job_id: message.job_id,
+                        url_domain: message.data.url ? new URL(message.data.url).hostname : null
+                    });
+                } else if (message.data.status === 'downloading' && message.data.progress?.completed === 1) {
+                    // Track time to first track
+                    posthog.capture('first_track_downloaded', {
+                        job_id: message.job_id,
+                        time_to_first_track_seconds: downloadStartTime ? Math.floor((Date.now() - downloadStartTime) / 1000) : null
                     });
                 }
             }
@@ -163,6 +184,13 @@ function showUnauthenticatedUI() {
     wg2.style.display = 'none';
 }
 
+// Track URL input method
+let urlInputMethod = 'unknown';
+let downloadStartTime = null;
+let sessionStartTime = Date.now();
+let downloadAttempts = 0;
+let pluginSelectionChanges = 0;
+
 // Download functionality
 async function startDownload() {
     const url = document.getElementById('url').value;
@@ -176,7 +204,10 @@ async function startDownload() {
         return;
     }
     
-    // Track download attempt
+    downloadStartTime = Date.now();
+    downloadAttempts++;
+    
+    // Track download attempt with enhanced analytics
     if (typeof posthog !== 'undefined') {
         posthog.capture('download_started', {
             url: url,  // Full URL for tracking
@@ -187,7 +218,13 @@ async function startDownload() {
             custom_name: name || 'none',
             has_custom_name: !!name,
             is_authenticated: isAuthenticated,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            // New tracking properties
+            url_input_method: urlInputMethod,
+            session_duration_seconds: Math.floor((Date.now() - sessionStartTime) / 1000),
+            download_attempt_number: downloadAttempts,
+            plugin_changes_before_download: pluginSelectionChanges,
+            concurrent_jobs: document.querySelectorAll('.job-item:not(.completed):not(.error):not(.cancelled)').length
         });
     }
     
@@ -246,6 +283,14 @@ async function startDownload() {
             if (response.status === 429) {
                 errorMessage = 'Rate limit exceeded. Please wait a minute before trying again.';
                 
+                // Track rate limit hit
+                if (typeof posthog !== 'undefined') {
+                    posthog.capture('rate_limit_hit', {
+                        download_attempts_before_limit: downloadAttempts,
+                        session_duration_seconds: Math.floor((Date.now() - sessionStartTime) / 1000)
+                    });
+                }
+                
                 // Disable submit button temporarily with countdown
                 const submitBtn = document.querySelector('button[onclick="submitDownload()"]');
                 if (submitBtn) {
@@ -261,6 +306,11 @@ async function startDownload() {
                             clearInterval(countdownInterval);
                             submitBtn.disabled = false;
                             submitBtn.textContent = 'Start Download';
+                            
+                            // Track when rate limit expires
+                            if (typeof posthog !== 'undefined') {
+                                posthog.capture('rate_limit_expired');
+                            }
                         }
                     };
                     
@@ -331,6 +381,17 @@ function createJobElement(job) {
         `;
     }
     
+    // Track queue position for pending jobs
+    if (job.status === 'pending' && job.queue_position !== undefined) {
+        if (typeof posthog !== 'undefined') {
+            posthog.capture('queue_position_update', {
+                job_id: job.job_id,
+                queue_position: job.queue_position,
+                is_first_in_queue: job.queue_position === 1
+            });
+        }
+    }
+    
     let actionsHtml = '';
     if (job.status === 'pending' || job.status === 'detecting') {
         actionsHtml = `<button onclick="cancelJob('${job.job_id}')" class="btn-cancel">Cancel</button>`;
@@ -390,6 +451,14 @@ async function streamDownload(jobId) {
     downloadsInProgress.add(jobId);
     console.log(`Starting download for job ${jobId}`);
     
+    // Track manual download click
+    if (typeof posthog !== 'undefined') {
+        posthog.capture('manual_download_triggered', {
+            job_id: jobId,
+            time_since_ready_seconds: downloadStartTime ? Math.floor((Date.now() - downloadStartTime) / 1000) : null
+        });
+    }
+    
     // Create a hidden link and click it to start download
     const link = document.createElement('a');
     link.href = `/api/stream/${jobId}`;
@@ -411,6 +480,17 @@ async function cancelJob(jobId) {
         const response = await fetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
         if (response.ok) {
             showNotification('Job cancelled', 'info');
+            
+            // Track job cancellation
+            if (typeof posthog !== 'undefined') {
+                const jobElement = document.getElementById(`job-${jobId}`);
+                const jobStatus = jobElement ? jobElement.querySelector('.job-status')?.textContent : 'unknown';
+                posthog.capture('job_cancelled', {
+                    job_id: jobId,
+                    job_status_when_cancelled: jobStatus,
+                    time_since_start_seconds: downloadStartTime ? Math.floor((Date.now() - downloadStartTime) / 1000) : null
+                });
+            }
         }
     } catch (error) {
         console.error('Cancel error:', error);
@@ -471,6 +551,13 @@ function displayServerDownloads(downloads) {
 }
 
 async function downloadAsZip(name) {
+    // Track server download retrieval
+    if (typeof posthog !== 'undefined') {
+        posthog.capture('server_download_retrieved', {
+            download_name: name,
+            is_admin: true
+        });
+    }
     window.open(`/api/downloads/${name}/zip?auth_token=${authToken}`);
 }
 
@@ -484,6 +571,14 @@ async function deleteDownload(name) {
         if (response.ok) {
             showNotification('Download deleted', 'info');
             loadServerDownloads();
+            
+            // Track server download deletion
+            if (typeof posthog !== 'undefined') {
+                posthog.capture('server_download_deleted', {
+                    download_name: name,
+                    is_admin: true
+                });
+            }
         }
     } catch (error) {
         console.error('Delete error:', error);
@@ -552,6 +647,19 @@ function cleanupStaleJobs() {
     });
 }
 
+// Helper function to categorize errors
+function categorizeError(errorMessage) {
+    if (!errorMessage) return 'unknown';
+    const msg = errorMessage.toLowerCase();
+    if (msg.includes('rate limit')) return 'rate_limit';
+    if (msg.includes('network') || msg.includes('connection')) return 'network';
+    if (msg.includes('plugin') || msg.includes('detect')) return 'plugin_error';
+    if (msg.includes('timeout')) return 'timeout';
+    if (msg.includes('auth') || msg.includes('permission')) return 'authentication';
+    if (msg.includes('format') || msg.includes('unsupported')) return 'unsupported_format';
+    return 'other';
+}
+
 // Initialize on load
 document.addEventListener('DOMContentLoaded', () => {
     // Wait a bit for PostHog to initialize
@@ -560,10 +668,19 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log('PostHog loaded successfully');
             posthog.capture('$pageview');
             
-            // Send a test event to verify integration
+            // Enhanced session tracking
             posthog.capture('audiofetch_loaded', {
                 timestamp: new Date().toISOString(),
-                user_agent: navigator.userAgent
+                user_agent: navigator.userAgent,
+                // Device and browser info
+                screen_width: window.screen.width,
+                screen_height: window.screen.height,
+                viewport_width: window.innerWidth,
+                viewport_height: window.innerHeight,
+                referrer: document.referrer || 'direct',
+                // Feature detection
+                has_websocket_support: 'WebSocket' in window,
+                connection_type: navigator.connection?.effectiveType || 'unknown'
             });
         } else {
             console.error('PostHog not loaded - check browser console for errors');
@@ -624,6 +741,76 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Load initial jobs
     loadJobs();
+    
+    // Track URL input interactions
+    const urlInput = document.getElementById('url');
+    if (urlInput) {
+        // Track paste events
+        urlInput.addEventListener('paste', () => {
+            urlInputMethod = 'paste';
+            if (typeof posthog !== 'undefined') {
+                posthog.capture('url_pasted');
+            }
+        });
+        
+        // Track manual typing
+        urlInput.addEventListener('input', (e) => {
+            if (e.inputType && e.inputType.includes('insert') && urlInputMethod !== 'paste') {
+                urlInputMethod = 'typed';
+            }
+        });
+        
+        // Track focus for engagement
+        urlInput.addEventListener('focus', () => {
+            if (typeof posthog !== 'undefined') {
+                posthog.capture('url_input_focused', {
+                    session_duration_seconds: Math.floor((Date.now() - sessionStartTime) / 1000)
+                });
+            }
+        });
+    }
+    
+    // Track plugin selection changes
+    const pluginSelect = document.getElementById('plugin');
+    if (pluginSelect) {
+        pluginSelect.addEventListener('change', (e) => {
+            pluginSelectionChanges++;
+            if (typeof posthog !== 'undefined') {
+                posthog.capture('plugin_changed', {
+                    new_plugin: e.target.value,
+                    change_number: pluginSelectionChanges,
+                    has_url: !!document.getElementById('url').value
+                });
+            }
+        });
+    }
+    
+    // Track download mode changes
+    const downloadModeElement = document.getElementById('download-mode');
+    if (downloadModeElement) {
+        downloadModeElement.addEventListener('change', (e) => {
+            if (typeof posthog !== 'undefined') {
+                posthog.capture('download_mode_changed', {
+                    new_mode: e.target.value,
+                    is_authenticated: isAuthenticated
+                });
+            }
+        });
+    }
+    
+    // Track session end
+    window.addEventListener('beforeunload', () => {
+        if (typeof posthog !== 'undefined') {
+            const sessionDuration = Math.floor((Date.now() - sessionStartTime) / 1000);
+            const activeJobs = document.querySelectorAll('.job-item:not(.completed):not(.error):not(.cancelled)').length;
+            posthog.capture('session_ended', {
+                session_duration_seconds: sessionDuration,
+                total_download_attempts: downloadAttempts,
+                active_jobs_on_exit: activeJobs,
+                successful_downloads: document.querySelectorAll('.job-item.completed').length
+            });
+        }
+    });
     
     // Fallback polling removed; rely on WebSocket updates and slow fallback on disconnect
     // If still needed, use loadJobs() manually after initial load
