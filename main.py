@@ -87,9 +87,9 @@ def get_available_plugins():
     plugins = []
     
     # Check for scraper modules
-    if os.path.exists('simple_scrape_mp3.py'):
+    if os.path.exists('scrapers/simple_audio_scraper.py'):
         plugins.append('simple')
-    if os.path.exists('scrape_plyr.py'):
+    if os.path.exists('scrapers/scrape_plyr.py'):
         plugins.append('plyr')
     
     # Add more plugins here as they're created
