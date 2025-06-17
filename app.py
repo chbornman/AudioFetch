@@ -37,15 +37,6 @@ import posthog
 # Load environment variables
 load_dotenv()
 
-# Initialize PostHog
-POSTHOG_API_KEY = os.getenv("POSTHOG_API_KEY", "phc_QWJN9uUxwtVg2XBV4DMVal1XwA85nEYaylFtTg3OdRF")
-if POSTHOG_API_KEY:
-    posthog.project_api_key = POSTHOG_API_KEY
-    posthog.host = 'https://us.i.posthog.com'
-    logger.info("PostHog initialized for server-side tracking")
-else:
-    logger.warning("PostHog API key not found, server-side tracking disabled")
-
 # Configure logging with more detail
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -57,6 +48,15 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Initialize PostHog
+POSTHOG_API_KEY = os.getenv("POSTHOG_API_KEY", "phc_QWJN9uUxwtVg2XBV4DMVal1XwA85nEYaylFtTg3OdRF")
+if POSTHOG_API_KEY:
+    posthog.project_api_key = POSTHOG_API_KEY
+    posthog.host = 'https://us.i.posthog.com'
+    logger.info("PostHog initialized for server-side tracking")
+else:
+    logger.warning("PostHog API key not found, server-side tracking disabled")
 
 # Import the existing modules
 import sys
@@ -556,9 +556,9 @@ async def process_download(job_id: str, download_request: DownloadRequest):
         await broadcast_job_update(job_id, job)
         
         if download_request.plugin == 'simple' or download_request.plugin == 'simple_mp3':
-            module_name = 'simple_scrape_mp3'
+            module_name = 'scrapers.simple_audio_scraper'
         elif download_request.plugin == 'plyr':
-            module_name = 'scrape_plyr'
+            module_name = 'scrapers.scrape_plyr'
         else:
             raise Exception(f"Unknown plugin: {download_request.plugin}")
         

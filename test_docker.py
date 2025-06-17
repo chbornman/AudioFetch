@@ -35,7 +35,7 @@ if static_exists:
 
 # Test 5: Test module imports
 print("\n5. Module Imports:")
-modules_to_test = ['player_info', 'downloader', 'simple_scrape_mp3', 'scrape_plyr']
+modules_to_test = ['player_info', 'downloader', 'scrapers.simple_audio_scraper', 'scrapers.scrape_plyr']
 for module in modules_to_test:
     try:
         __import__(module)

@@ -2,7 +2,7 @@
 import os
 import asyncpg
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
 
@@ -81,7 +81,7 @@ async def log_download_request(
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             """, job_id, url, url_domain, custom_name, plugin, workers,
                 download_mode, is_authenticated, connection_id,
-                'pending', user_agent, ip_address, datetime.utcnow())
+                'pending', user_agent, ip_address, datetime.now(timezone.utc))
             return True
         except Exception as e:
             logger.error(f"Failed to log download request: {e}")
@@ -100,7 +100,7 @@ async def update_download_status(
             return False
         
         try:
-            completed_at = datetime.utcnow() if status in ['completed', 'error', 'cancelled'] else None
+            completed_at = datetime.now(timezone.utc) if status in ['completed', 'error', 'cancelled'] else None
             
             # Calculate duration if completed
             duration_seconds = None

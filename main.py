@@ -215,9 +215,9 @@ def main():
     # Import and run the appropriate scraper
     try:
         if plugin_name == 'simple':
-            module_name = 'simple_scrape_mp3'
+            module_name = 'scrapers.simple_audio_scraper'
         elif plugin_name == 'plyr':
-            module_name = 'scrape_plyr'
+            module_name = 'scrapers.scrape_plyr'
         else:
             raise ValueError(f"Unknown plugin: {plugin_name}")
         
